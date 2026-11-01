@@ -5,6 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const read = (file) => fs.readFileSync(path.join(__dirname, file), 'utf8');
 const html = read('index.html');
@@ -207,4 +208,35 @@ test('stale AI responses are invalidated when the plan or language changes', () 
   assert.match(appJs, /function onSubmit\(event\)[\s\S]*invalidatePendingRequests\(\);[\s\S]*state = \{ input: checked\.value/);
   assert.match(appJs, /function onReplan\(event\)[\s\S]*invalidatePendingRequests\(\);[\s\S]*state = result\.state/);
   assert.match(appJs, /function setLanguage\(next\)[\s\S]*invalidatePendingRequests\(\);[\s\S]*lang = next/);
+});
+
+// ----------------------------------------------- the browser load path (round 2)
+test('the four scripts work as plain <script> tags: right order, no require, no module', () => {
+  // A fresh context that looks like a browser window: `self`, no `module`, no `require`.
+  const sandbox = { TextEncoder, console };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  const order = [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order, ['data.js', 'core.js', 'strings.js', 'app.js'], 'index.html loads the scripts in dependency order');
+  for (const file of ['data.js', 'core.js', 'strings.js']) vm.runInContext(read(file), sandbox, { filename: file });
+  assert.equal(typeof sandbox.AnushthanData.EVENT_TYPES, 'object');
+  assert.equal(typeof sandbox.AnushthanCore.buildPlan, 'function');
+  assert.equal(typeof sandbox.AnushthanStrings.TEXT.bn.title, 'string');
+  const checked = sandbox.AnushthanCore.validateInput({ eventType: 'puja', eventDate: '2027-01-20', headcount: 100, budget: 50000 }, '2026-11-02');
+  assert.equal(checked.ok, true);
+  assert.equal(sandbox.AnushthanCore.buildPlan(checked.value, '2026-11-02').budget.rows.reduce((n, r) => n + r.amount, 0), 50000);
+});
+
+test('the CSP also blocks plugins and forces https', () => {
+  const csp = vercel.headers[0].headers.find((h) => h.key === 'Content-Security-Policy').value;
+  assert.match(csp, /object-src 'none'/);
+  assert.match(csp, /upgrade-insecure-requests/);
+});
+
+test('package.json scripts: check covers every shipped JavaScript file, coverage enforces thresholds', () => {
+  const pkg = JSON.parse(read('package.json'));
+  for (const file of ['core.js', 'data.js', 'strings.js', 'app.js', 'api/assist.js']) assert.ok(pkg.scripts.check.includes(`node --check ${file}`), file);
+  assert.match(pkg.scripts.coverage, /--test-coverage-lines=\d+/);
+  assert.match(pkg.scripts.coverage, /--test-coverage-branches=\d+/);
+  assert.match(pkg.scripts.coverage, /--test-coverage-functions=\d+/);
 });
