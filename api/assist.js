@@ -16,6 +16,7 @@
  *  - Free text ("notes", "question") goes into the prompt as quoted data, never as instructions.
  *  - Model output is parsed as JSON, length-limited and stripped of angle brackets.
  *  - A small per-IP rate limit protects the free quota (best effort on serverless).
+ *  - Any unexpected error is caught and answered with a plain JSON 500; stack traces never reach the client.
  */
 const Core = require('../core.js');
 
@@ -27,7 +28,13 @@ const DEADLINE_MS = 8500; // stay under the 10 s limit of free serverless functi
 // User-requested cap: at most 14 requests per minute per client IP.
 const RATE_LIMIT = { windowMs: 60000, max: 14 };
 const MAX_BODY_BYTES = 8 * 1024;
+const MAX_OUTPUT_TOKENS = 2048;
+const MAX_TRACKED_CLIENTS = 500; // upper bound for the in-memory rate-limit table
 const QUESTION = { min: 3, max: 200 };
+// Identical requests (same plan, same language, same question) get the same answer for a short while, so a
+// language toggle back and forth, a repeated chip or a page reload costs no new Gemini call. Only real Gemini
+// answers are kept, never fallbacks, so a retry after an outage can still succeed.
+const CACHE = { ttlMs: 10 * 60 * 1000, max: 200 };
 const LANGUAGE_NAME = { bn: 'Bengali', en: 'English' };
 
 // ------------------------------------------------------------------ prompting
@@ -92,8 +99,8 @@ function cleanList(value, count, max) {
   return value.map((v) => clean(v, max)).filter(Boolean).slice(0, count);
 }
 
-/** Turns the model text into a safe answer object, or null if it does not have the expected shape. */
-function parseAssist(text) {
+/** Parses the model text as JSON (tolerating a ```json fence). Returns a plain object or null. */
+function parseModelJson(text) {
   if (typeof text !== 'string') return null;
   const stripped = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   let data;
@@ -102,7 +109,13 @@ function parseAssist(text) {
   } catch (e) {
     return null;
   }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+}
+
+/** Turns the model text into a safe answer object, or null if it does not have the expected shape. */
+function parseAssist(text) {
+  const data = parseModelJson(text);
+  if (!data) return null;
   const focus = clean(data.focus, 200);
   const ideas = cleanList(data.ideas, 5, 160);
   const savingTips = cleanList(data.savingTips, 3, 160);
@@ -116,15 +129,8 @@ function parseAssist(text) {
 
 /** Turns the model text for a question into { answer }, or null if it is not usable. */
 function parseAnswer(text) {
-  if (typeof text !== 'string') return null;
-  const stripped = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  let data;
-  try {
-    data = JSON.parse(stripped);
-  } catch (e) {
-    return null;
-  }
-  const answer = data && typeof data === 'object' ? clean(data.answer, 600) : '';
+  const data = parseModelJson(text);
+  const answer = data ? clean(data.answer, 600) : '';
   return answer ? { answer } : null;
 }
 
@@ -155,8 +161,10 @@ async function askGemini({ key, models, prompt, accept, fetchImpl, deadlineMs, n
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: prompt.system }] },
           contents: [{ role: 'user', parts: [{ text: prompt.user }] }],
-          // The schema is short; a bounded output budget reduces latency and token spend.
-          generationConfig: { temperature: 0.7, maxOutputTokens: 1200, responseMimeType: 'application/json' },
+          // No temperature/topP/topK: Gemini 3.5+ deprecates them (ignored now, a 400 error in later generations);
+          // wording is steered by the system instruction instead. The output budget is bounded for latency and
+          // spend, but roomy enough for Bengali script, which uses many tokens per character.
+          generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS, responseMimeType: 'application/json' },
         }),
         signal: controller.signal,
       });
@@ -173,12 +181,39 @@ async function askGemini({ key, models, prompt, accept, fetchImpl, deadlineMs, n
       return { ok: true, model, parsed };
     } catch (e) {
       if (e && e.name === 'AbortError') return { ok: false, reason: 'timeout' };
-      reason = 'network';
+      // response.json() rejects with a SyntaxError when Gemini sends a body that is not JSON.
+      reason = e instanceof SyntaxError ? 'bad_response' : 'network';
     } finally {
       clearTimeout(timer);
     }
   }
   return { ok: false, reason };
+}
+
+// ---------------------------------------------------------------------- cache
+/**
+ * Small in-memory answer cache with a time limit and a size limit (least recently used goes first).
+ * Values are the final JSON bodies, a few KB each, so the whole table stays well under a megabyte.
+ */
+function createAnswerCache({ ttlMs, max, now }) {
+  const entries = new Map();
+  return {
+    get(key) {
+      const entry = entries.get(key);
+      if (!entry) return null;
+      entries.delete(key);
+      if (now() - entry.at >= ttlMs) return null;
+      entries.set(key, entry); // re-insert: most recently used moves to the end
+      return entry.body;
+    },
+    set(key, body) {
+      if (max <= 0 || ttlMs <= 0) return;
+      entries.delete(key);
+      entries.set(key, { at: now(), body });
+      while (entries.size > max) entries.delete(entries.keys().next().value);
+    },
+    get size() { return entries.size; },
+  };
 }
 
 // -------------------------------------------------------------------- handler
@@ -192,6 +227,68 @@ function clientIp(req) {
   return remote && remote.length <= 64 ? remote : 'unknown';
 }
 
+/** Sends a JSON response. */
+function send(res, status, body) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * Fixed-window-per-address limiter kept in memory. hit(ip) records one request and returns
+ * { limited, retryAfterSec }. Memory is bounded: past `maxTracked` addresses it sheds stale
+ * entries first and, if the table is still full, refuses new addresses.
+ */
+function createRateLimiter({ windowMs, max, maxTracked, now }) {
+  const hits = new Map();
+  return {
+    hit(ip) {
+      const t = now();
+      const recent = (hits.get(ip) || []).filter((stamp) => t - stamp < windowMs);
+      recent.push(t);
+      hits.set(ip, recent);
+      if (hits.size > maxTracked) {
+        for (const [key, stamps] of hits) if (!stamps.length || t - stamps[stamps.length - 1] >= windowMs) hits.delete(key);
+      }
+      const limited = hits.size > maxTracked || recent.length > max;
+      const retryAfterSec = limited ? Math.max(1, Math.ceil((recent[0] + windowMs - t) / 1000)) : 0;
+      return { limited, retryAfterSec };
+    },
+  };
+}
+
+/** Browsers send Origin on cross-site calls; when it is present it must be this site, over https (or localhost). */
+function originAllowed(headers) {
+  if (!headers.origin) return true;
+  try {
+    const origin = new URL(String(headers.origin));
+    const host = String(headers.host || '').toLowerCase();
+    const secure = origin.protocol === 'https:' || origin.hostname === 'localhost' || origin.hostname === '127.0.0.1';
+    return Boolean(host) && origin.host.toLowerCase() === host && secure;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** The Gemini key from the environment (GOOGLE_API_KEY preferred), or '' when none is set. */
+function readApiKey(env) {
+  const pick = (name) => (typeof env[name] === 'string' ? env[name].trim() : '');
+  return pick('GOOGLE_API_KEY') || pick('GEMINI_API_KEY');
+}
+
+/** Parses the body (already an object on Vercel, a string elsewhere). Returns a plain object or null. */
+function readBody(raw) {
+  let body = raw;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch (e) {
+      return null;
+    }
+  }
+  return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+}
+
 /**
  * Builds the request handler. Dependencies can be replaced in tests:
  * { env, fetch, now, log, deadlineMs }.
@@ -203,66 +300,36 @@ function createHandler(deps) {
   const now = d.now || Date.now;
   const log = d.log || ((...args) => console.warn(...args));
   const deadlineMs = d.deadlineMs || DEADLINE_MS;
-  const hits = new Map();
+  const limiter = createRateLimiter({ ...RATE_LIMIT, maxTracked: MAX_TRACKED_CLIENTS, now });
+  const cache = createAnswerCache({ ttlMs: d.cacheTtlMs === undefined ? CACHE.ttlMs : d.cacheTtlMs, max: d.cacheMax === undefined ? CACHE.max : d.cacheMax, now });
+  const inflight = new Map(); // cache key -> the Gemini call already running for it
 
-  function tooMany(ip) {
-    const t = now();
-    const recent = (hits.get(ip) || []).filter((stamp) => t - stamp < RATE_LIMIT.windowMs);
-    recent.push(t);
-    hits.set(ip, recent);
-    if (hits.size > 500) {
-      for (const [k, v] of hits) if (!v.length || t - v[v.length - 1] >= RATE_LIMIT.windowMs) hits.delete(k);
-    }
-    // Bound memory even if a burst arrives from many distinct addresses.
-    if (hits.size > 500) return true;
-    return recent.length > RATE_LIMIT.max;
-  }
-
-  return async function handler(req, res) {
-    const send = (status, body) => {
-      res.statusCode = status;
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.end(JSON.stringify(body));
-    };
+  async function handle(req, res) {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
 
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST');
-      return send(405, { error: 'method_not_allowed' });
+      return send(res, 405, { error: 'method_not_allowed' });
     }
 
     const headers = req.headers || {};
-    // Browsers may omit Origin for non-browser clients; when present, require same-origin.
-    if (headers.origin) {
-      try {
-        const origin = new URL(String(headers.origin));
-        const host = String(headers.host || '').toLowerCase();
-        const secure = origin.protocol === 'https:' || origin.hostname === 'localhost' || origin.hostname === '127.0.0.1';
-        if (!host || origin.host.toLowerCase() !== host || !secure) {
-          return send(403, { error: 'origin_not_allowed' });
-        }
-      } catch (e) {
-        return send(403, { error: 'origin_not_allowed' });
-      }
+    if (!originAllowed(headers)) return send(res, 403, { error: 'origin_not_allowed' });
+    const rate = limiter.hit(clientIp(req));
+    if (rate.limited) {
+      res.setHeader('Retry-After', String(rate.retryAfterSec));
+      return send(res, 429, { error: 'too_many_requests' });
     }
-    if (tooMany(clientIp(req))) return send(429, { error: 'too_many_requests' });
-    if (!/^application\/json\b/i.test(String(headers['content-type'] || ''))) return send(415, { error: 'json_required' });
-    if (Number(headers['content-length']) > MAX_BODY_BYTES) return send(413, { error: 'body_too_large' });
+    if (!/^application\/json\b/i.test(String(headers['content-type'] || ''))) return send(res, 415, { error: 'json_required' });
+    if (Number(headers['content-length']) > MAX_BODY_BYTES) return send(res, 413, { error: 'body_too_large' });
 
-    let body = req.body;
-    if (typeof body === 'string') {
-      try {
-        body = JSON.parse(body);
-      } catch (e) {
-        body = null;
-      }
-    }
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(400, { error: 'bad_json' });
+    const body = readBody(req.body);
+    if (!body) return send(res, 400, { error: 'bad_json' });
     // Measure UTF-8 bytes, not JavaScript characters: Bengali and other multibyte text
     // can otherwise pass the 8 KB limit while occupying several times that many bytes.
-    if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_BODY_BYTES) return send(413, { error: 'body_too_large' });
+    if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_BODY_BYTES) return send(res, 413, { error: 'body_too_large' });
+    if (body.action !== undefined && body.action !== 'ask') return send(res, 400, { error: 'invalid_action' });
 
     // "today" comes from the browser (the organiser's own calendar day) but only if it is plausible.
     const serverToday = Core.toISODate(now());
@@ -270,42 +337,67 @@ function createHandler(deps) {
     const today = clientToday && Math.abs(Core.daysBetween(serverToday, clientToday)) <= 2 ? clientToday : serverToday;
 
     const checked = Core.validateInput(body, today);
-    if (!checked.ok) return send(400, { error: 'invalid_input', details: checked.errors });
+    if (!checked.ok) return send(res, 400, { error: 'invalid_input', details: checked.errors });
 
     const input = checked.value;
-    const plan = Core.buildPlan(input, today);
 
     // Two kinds of request share the same checks, key handling and fallback behaviour.
     const asking = body.action === 'ask';
     const question = asking ? cleanQuestion(body.question) : null;
-    if (asking && !question) return send(400, { error: 'invalid_question' });
+    if (asking && !question) return send(res, 400, { error: 'invalid_question' });
+
+    // A repeat of a request that Gemini already answered is served from memory: no plan, no prompt, no API call.
+    const cacheKey = JSON.stringify([question, today, input]);
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', 'hit');
+      return send(res, 200, cached);
+    }
+    res.setHeader('X-Cache', 'miss');
+
+    const plan = Core.buildPlan(input, today);
     const task = asking
       ? { prompt: buildAskPrompt(input, plan, question), accept: parseAnswer, fallback: { answer: Core.answerFallback(question, plan, input.lang) } }
       : { prompt: buildPrompt(input, plan), accept: parseAssist, fallback: Core.fallbackAssist(input, plan) };
-    const answer = (extra) => send(200, { ...task.fallback, ...extra });
+    const answer = (extra) => send(res, 200, { ...task.fallback, ...extra });
 
-    const env = getEnv();
-    const key = typeof env.GOOGLE_API_KEY === 'string' && env.GOOGLE_API_KEY.trim()
-      ? env.GOOGLE_API_KEY.trim()
-      : (typeof env.GEMINI_API_KEY === 'string' ? env.GEMINI_API_KEY.trim() : '');
+    const key = readApiKey(getEnv());
     if (!key) return answer({ source: 'fallback', reason: 'no_api_key' });
 
-    const models = String(env.GEMINI_MODEL || '').split(',').map((m) => m.trim()).filter(Boolean);
-    const result = await askGemini({
-      key, models: models.length ? models : DEFAULT_MODELS, prompt: task.prompt,
-      accept: task.accept, fetchImpl, deadlineMs, now,
-    });
+    const models = String(getEnv().GEMINI_MODEL || '').split(',').map((m) => m.trim()).filter(Boolean);
+    // Identical requests that arrive while one is still running share that single Gemini call.
+    let call = inflight.get(cacheKey);
+    if (!call) {
+      call = askGemini({
+        key, models: models.length ? models : DEFAULT_MODELS, prompt: task.prompt,
+        accept: task.accept, fetchImpl, deadlineMs, now,
+      }).finally(() => inflight.delete(cacheKey));
+      inflight.set(cacheKey, call);
+    }
+    const result = await call;
     if (!result.ok) {
       log('assist: using fallback, reason =', result.reason);
       return answer({ source: 'fallback', reason: result.reason });
     }
-    return answer({ source: 'gemini', model: result.model, ...result.parsed });
+    const body200 = { ...task.fallback, source: 'gemini', model: result.model, ...result.parsed };
+    cache.set(cacheKey, body200);
+    return send(res, 200, body200);
+  }
+
+  // One safety net around everything: an unexpected bug becomes a small JSON 500, never a stack trace.
+  return async function handler(req, res) {
+    try {
+      await handle(req, res);
+    } catch (error) {
+      log('assist: unexpected error:', error && error.message ? error.message : 'unknown');
+      if (!res.headersSent && !res.writableEnded) send(res, 500, { error: 'internal_error' });
+    }
   };
 }
 
 // Vercel runs the default export. The helpers are attached so tests can reach them.
 module.exports = createHandler();
 Object.assign(module.exports, {
-  createHandler, buildPrompt, buildAskPrompt, parseAssist, parseAnswer, askGemini, cleanQuestion,
-  DEFAULT_MODELS, RATE_LIMIT, MAX_BODY_BYTES,
+  createHandler, createRateLimiter, createAnswerCache, buildPrompt, buildAskPrompt, parseAssist, parseAnswer, askGemini, cleanQuestion,
+  DEFAULT_MODELS, RATE_LIMIT, CACHE, MAX_BODY_BYTES, MAX_TRACKED_CLIENTS, MAX_OUTPUT_TOKENS,
 });
