@@ -2,7 +2,7 @@
 // Run with: npm test. The Gemini API is replaced by a fake fetch, so no network or key is needed.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createHandler, parseAssist, parseAnswer, cleanQuestion, buildPrompt, DEFAULT_MODELS, RATE_LIMIT, MAX_BODY_BYTES } = require('./api/assist.js');
+const { createHandler, createRateLimiter, createAnswerCache, CACHE, MAX_TRACKED_CLIENTS, MAX_OUTPUT_TOKENS, parseAssist, parseAnswer, cleanQuestion, buildPrompt, DEFAULT_MODELS, RATE_LIMIT, MAX_BODY_BYTES } = require('./api/assist.js');
 const Core = require('./core.js');
 
 const NOW = Date.UTC(2026, 10, 1, 6, 0, 0); // 2026-11-01
@@ -327,4 +327,233 @@ test('allows a same-origin HTTPS request', async () => {
   const { handler } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
   const res = await request(handler, { headers: { origin: 'https://app.example', host: 'app.example' } });
   assert.equal(res.statusCode, 200);
+});
+
+// ------------------------------------------------------------ hardening (round 2)
+test('an unexpected bug becomes a small JSON 500 with no stack trace or key', async () => {
+  const logged = [];
+  const handler = createHandler({ env: () => ({ GEMINI_API_KEY: KEY }), now: () => NOW, log: (...args) => logged.push(args.join(' ')),
+    fetch: async () => { throw new Error(`boom with ${KEY}`); } });
+  const original = Core.buildPlan;
+  Core.buildPlan = () => { throw new Error('planner exploded'); };
+  try {
+    const res = await request(handler);
+    assert.equal(res.statusCode, 500);
+    assert.deepEqual(res.json(), { error: 'internal_error' });
+    assert.equal(res.body.includes('planner exploded'), false);
+    assert.equal(res.body.includes(' at '), false, 'no stack trace');
+    assert.ok(logged.some((line) => line.includes('planner exploded')), 'the problem is logged for the owner');
+  } finally {
+    Core.buildPlan = original;
+  }
+});
+
+test('a 500 is not sent twice when the response has already ended', async () => {
+  const handler = createHandler({ env: () => ({}), now: () => NOW, log: () => {} });
+  const res = fakeRes();
+  res.writableEnded = true;
+  res.end = () => { throw new Error('end() failed'); };
+  const req = { method: 'POST', body: GOOD_BODY, headers: { 'content-type': 'application/json' }, socket: { remoteAddress: '3.3.3.3' } };
+  await handler(req, res); // must resolve, not reject
+  assert.equal(res.body, null);
+});
+
+test('a 429 tells the client when to retry', async () => {
+  const { handler } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  let last;
+  for (let i = 0; i <= RATE_LIMIT.max; i += 1) last = await request(handler, { ip: '4.4.4.4' });
+  assert.equal(last.statusCode, 429);
+  const wait = Number(last.headers['retry-after']);
+  assert.ok(Number.isInteger(wait) && wait >= 1 && wait <= RATE_LIMIT.windowMs / 1000, `Retry-After was ${last.headers['retry-after']}`);
+});
+
+test('an unknown action is rejected instead of being treated as a plain request', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  const res = await request(handler, { body: { ...GOOD_BODY, action: 'delete_everything' } });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'invalid_action');
+  assert.equal(calls.length, 0);
+});
+
+test('a malformed Origin header is refused', async () => {
+  const { handler } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  const res = await request(handler, { headers: { origin: 'not a url', host: 'app.example' } });
+  assert.equal(res.statusCode, 403);
+});
+
+test('a body from Gemini that is not JSON is reported as bad_response, not network', async () => {
+  const { handler } = makeHandler({ fetch: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } }) });
+  const out = (await request(handler)).json();
+  assert.equal(out.source, 'fallback');
+  assert.equal(out.reason, 'bad_response');
+});
+
+test('a body string that is not valid JSON gets a 400', async () => {
+  const { handler } = makeHandler({});
+  assert.equal((await request(handler, { body: '{not json' })).statusCode, 400);
+  assert.equal((await request(handler, { body: '[1,2]' })).statusCode, 400);
+});
+
+test('Bengali digits and padded numbers are accepted in the request', async () => {
+  const { handler } = makeHandler({ env: {} });
+  const res = await request(handler, { body: { ...GOOD_BODY, headcount: '১৫০', budget: ' 60000 ' } });
+  assert.equal(res.statusCode, 200);
+});
+
+test('hex and exponent numbers are rejected by the API', async () => {
+  const { handler } = makeHandler({ env: {} });
+  const res = await request(handler, { body: { ...GOOD_BODY, headcount: '0x64', budget: '1e4' } });
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.json().details.map((d) => d.field).sort(), ['budget', 'headcount']);
+});
+
+// ------------------------------------------------------------------ rate limiter
+test('rate limiter: allows `max` hits per window, then limits, then recovers', () => {
+  let t = 1000;
+  const limiter = createRateLimiter({ windowMs: 60000, max: 3, maxTracked: 50, now: () => t });
+  assert.deepEqual([1, 2, 3].map(() => limiter.hit('a').limited), [false, false, false]);
+  const fourth = limiter.hit('a');
+  assert.equal(fourth.limited, true);
+  assert.equal(fourth.retryAfterSec, 60);
+  assert.equal(limiter.hit('b').limited, false, 'another address is unaffected');
+  t += 60001;
+  assert.equal(limiter.hit('a').limited, false, 'the window has passed');
+});
+
+test('rate limiter: memory stays bounded, stale addresses are shed, and a full table refuses newcomers', () => {
+  let t = 0;
+  const limiter = createRateLimiter({ windowMs: 60000, max: 14, maxTracked: MAX_TRACKED_CLIENTS, now: () => t });
+  for (let i = 0; i < MAX_TRACKED_CLIENTS; i += 1) assert.equal(limiter.hit(`ip-${i}`).limited, false);
+  assert.equal(limiter.hit('one-too-many').limited, true, 'all 500 are still fresh, so the table refuses a new address');
+  t += 61000;
+  assert.equal(limiter.hit('later').limited, false, 'stale entries were dropped, so there is room again');
+});
+
+// ------------------------------------------------ what we send to Gemini (round 3)
+test('the Gemini request follows the current API rules: no sampling parameters, ends with a user turn, JSON output', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  await request(handler);
+  const sent = JSON.parse(calls[0].init.body);
+  for (const deprecated of ['temperature', 'topP', 'top_p', 'topK', 'top_k', 'candidateCount']) {
+    assert.equal(deprecated in sent.generationConfig, false, `${deprecated} must not be sent`);
+  }
+  assert.equal(sent.generationConfig.responseMimeType, 'application/json');
+  assert.ok(sent.generationConfig.maxOutputTokens >= 2048 && sent.generationConfig.maxOutputTokens === MAX_OUTPUT_TOKENS);
+  assert.equal(sent.contents[sent.contents.length - 1].role, 'user', 'a request must not end with a model turn');
+});
+
+// ------------------------------------------------------------ answer cache and shared calls
+test('a repeated request is answered from memory without a second Gemini call', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  const first = await request(handler);
+  const second = await request(handler);
+  assert.equal(calls.length, 1);
+  assert.equal(first.headers['x-cache'], 'miss');
+  assert.equal(second.headers['x-cache'], 'hit');
+  assert.deepEqual(second.json(), first.json());
+  assert.equal(second.headers['cache-control'], 'no-store');
+});
+
+test('a different plan, language, question or day is not served from another request\'s answer', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  await request(handler);
+  await request(handler, { body: { ...GOOD_BODY, lang: 'en' } });
+  await request(handler, { body: { ...GOOD_BODY, headcount: 151 } });
+  await request(handler, { body: { ...GOOD_BODY, today: '2026-11-02' } });
+  assert.equal(calls.length, 4);
+});
+
+test('questions are cached per question text', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => geminiReply({ answer: 'ছাউনি রাখো।' }) });
+  const ask = (question) => request(handler, { body: { ...GOOD_BODY, action: 'ask', question } });
+  await ask('বৃষ্টি হলে কী করব?');
+  const again = await ask('বৃষ্টি হলে কী করব?');
+  await ask('বাজেট কম পড়লে কী ছাঁটব?');
+  assert.equal(calls.length, 2);
+  assert.equal(again.headers['x-cache'], 'hit');
+  assert.equal(again.json().answer, 'ছাউনি রাখো।');
+});
+
+test('fallback answers are never cached, so a retry can still reach Gemini', async () => {
+  let up = false;
+  const { handler, calls } = makeHandler({ fetch: async () => (up ? geminiReply(GOOD_AI) : httpStatus(503)) });
+  const down = await request(handler);
+  assert.equal(down.json().source, 'fallback');
+  up = true;
+  const back = await request(handler);
+  assert.equal(back.json().source, 'gemini');
+  assert.equal(calls.length, 2);
+  const noKey = makeHandler({ fetch: async () => geminiReply(GOOD_AI), env: {} });
+  await request(noKey.handler);
+  assert.equal((await request(noKey.handler)).headers['x-cache'], 'miss');
+});
+
+test('identical requests that arrive together share one Gemini call', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { handler, calls } = makeHandler({ fetch: async () => { await gate; return geminiReply(GOOD_AI); } });
+  const pending = [request(handler, { ip: '3.3.3.1' }), request(handler, { ip: '3.3.3.2' }), request(handler, { ip: '3.3.3.3' })];
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  const done = await Promise.all(pending);
+  assert.equal(calls.length, 1);
+  assert.ok(done.every((r) => r.statusCode === 200 && r.json().source === 'gemini'));
+});
+
+test('a failed shared call gives every waiting request the fallback, and the next request tries again', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { handler, calls } = makeHandler({ fetch: async () => { await gate; return httpStatus(503); } });
+  const pending = [request(handler, { ip: '4.4.4.1' }), request(handler, { ip: '4.4.4.2' })];
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  const done = await Promise.all(pending);
+  assert.equal(calls.length, DEFAULT_MODELS.length);
+  assert.ok(done.every((r) => r.json().source === 'fallback'));
+  await request(handler, { ip: '4.4.4.3' });
+  assert.equal(calls.length, DEFAULT_MODELS.length * 2);
+});
+
+test('answers expire after the time limit', async () => {
+  let clock = NOW;
+  const calls = [];
+  const handler = createHandler({ env: () => ({ GEMINI_API_KEY: KEY }), now: () => clock, log: () => {}, cacheTtlMs: 1000,
+    fetch: async (url, init) => { calls.push(init); return geminiReply(GOOD_AI); } });
+  await request(handler);
+  clock += 999;
+  assert.equal((await request(handler)).headers['x-cache'], 'hit');
+  clock += 1000;
+  assert.equal((await request(handler)).headers['x-cache'], 'miss');
+  assert.equal(calls.length, 2);
+});
+
+test('the cache can be switched off', async () => {
+  const { handler, calls } = (() => {
+    const log = [];
+    const h = createHandler({ env: () => ({ GEMINI_API_KEY: KEY }), now: () => NOW, log: () => {}, cacheMax: 0,
+      fetch: async (url, init) => { log.push(init); return geminiReply(GOOD_AI); } });
+    return { handler: h, calls: log };
+  })();
+  await request(handler);
+  await request(handler);
+  assert.equal(calls.length, 2);
+});
+
+test('answer cache: least recently used entry goes first, expired entries are dropped, size stays bounded', () => {
+  let clock = 0;
+  const cache = createAnswerCache({ ttlMs: 100, max: 2, now: () => clock });
+  cache.set('a', { n: 1 });
+  cache.set('b', { n: 2 });
+  assert.deepEqual(cache.get('a'), { n: 1 }); // a is now the most recently used
+  cache.set('c', { n: 3 });
+  assert.equal(cache.get('b'), null);
+  assert.equal(cache.size, 2);
+  cache.set('c', { n: 4 }); // overwriting does not grow the table
+  assert.equal(cache.size, 2);
+  assert.deepEqual(cache.get('c'), { n: 4 });
+  clock = 100;
+  assert.equal(cache.get('a'), null);
+  assert.equal(cache.size, 1);
+  assert.equal(CACHE.max, 200);
+  assert.equal(CACHE.ttlMs, 600000);
 });
