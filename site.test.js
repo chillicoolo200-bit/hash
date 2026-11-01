@@ -26,11 +26,11 @@ test('the page declares its language, has one h1 and a viewport that allows zoom
 });
 
 test('favicon, real 404 page and cross-origin security headers are present', () => {
-  assert.match(html, /rel="icon" href="\\/favicon\\.svg"/);
-  assert.match(favicon, /<svg[\\s>]/);
+  assert.ok(html.includes('rel="icon" href="/favicon.svg"'));
+  assert.ok(favicon.startsWith("<svg"));
   assert.match(notFound, /404/);
-  assert.match(notFound, /href="\\/"/);
-  assert.doesNotMatch(notFound, /\\sstyle="/);
+  assert.ok(notFound.includes('href="/"'));
+  assert.doesNotMatch(notFound, /\sstyle="/);
   const headers = vercel.headers.flatMap((rule) => rule.headers || []);
   assert.ok(headers.some((h) => h.key === 'Cross-Origin-Embedder-Policy' && h.value === 'require-corp'));
   assert.ok(headers.some((h) => h.key === 'Cross-Origin-Resource-Policy' && h.value === 'same-origin'));
