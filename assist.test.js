@@ -81,6 +81,15 @@ test('asks for JSON output and puts the user request in a separate message from 
 });
 
 // -------------------------------------------------------------- resilience
+test('GOOGLE_API_KEY is accepted as the primary server-side secret name', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => geminiReply(GOOD_AI), env: { GOOGLE_API_KEY: KEY } });
+  const out = (await request(handler)).json();
+  assert.equal(out.source, 'gemini');
+  assert.equal(out.model, 'gemini-3.5-flash-lite');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.headers['x-goog-api-key'], KEY);
+});
+
 test('without an API key it still answers, using the built-in templates', async () => {
   const { handler, calls } = makeHandler({ fetch: async () => geminiReply(GOOD_AI), env: {} });
   const out = (await request(handler)).json();
@@ -90,12 +99,13 @@ test('without an API key it still answers, using the built-in templates', async 
   assert.equal(calls.length, 0);
 });
 
-test('a missing model (404) moves on to the next model', async () => {
-  const { handler, calls } = makeHandler({ fetch: async (url, init, n) => (n === 1 ? httpStatus(404) : geminiReply(GOOD_AI)) });
+test('a missing configured model (404) falls back without silently switching models', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => httpStatus(404) });
   const out = (await request(handler)).json();
-  assert.equal(out.source, 'gemini');
-  assert.equal(out.model, DEFAULT_MODELS[1]);
-  assert.equal(calls.length, 2);
+  assert.equal(out.source, 'fallback');
+  assert.equal(out.reason, 'model_unavailable');
+  assert.equal(calls.length, 1);
+  assert.equal(DEFAULT_MODELS[0], 'gemini-3.5-flash-lite');
 });
 
 test('GEMINI_MODEL overrides the default model list', async () => {
