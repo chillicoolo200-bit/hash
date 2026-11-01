@@ -6,7 +6,7 @@
  * Runs in the browser (window.AnushthanCore) and in Node (require).
  * No network, no DOM, no randomness: the same input always gives the same plan,
  * which keeps every rule easy to test. Money, dates and task dependencies live
- * here on purpose; the AI model is only used for ideas and wording (see assist-handler.js).
+ * here on purpose; the AI model is only used for ideas and wording (see api/assist.js).
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./data.js'));
@@ -58,6 +58,18 @@
   const BN_DIGITS = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
   const localizeDigits = (text, lang) => (lang === 'bn' ? String(text).replace(/\d/g, (d) => BN_DIGITS[d]) : String(text));
 
+  /**
+   * Reads a whole number from a number or a plain digit string (Bengali digits allowed).
+   * Returns NaN for everything else. Unlike Number(), it rejects hex ("0x64"), exponents ("1e4"),
+   * signs, decimals, arrays and booleans, so only what a person would really type is accepted.
+   */
+  function toWholeNumber(value) {
+    if (typeof value === 'number') return Number.isInteger(value) ? value : NaN;
+    if (typeof value !== 'string') return NaN;
+    const ascii = value.trim().replace(/[০-৯]/g, (digit) => String(BN_DIGITS.indexOf(digit)));
+    return /^\d{1,9}$/.test(ascii) ? Number(ascii) : NaN;
+  }
+
   /** Indian digit grouping (12,34,567), done by hand so output is identical on every device. */
   function groupIndian(n) {
     const s = String(Math.round(Math.abs(n)));
@@ -96,13 +108,13 @@
       errors.push(err('eventDate', 'তারিখ দুই বছরের মধ্যে হতে হবে।', 'The date must be within two years.'));
     }
 
-    const headcount = Number(body.headcount);
+    const headcount = toWholeNumber(body.headcount);
     if (!Number.isInteger(headcount) || headcount < LIMITS.minHeadcount || headcount > LIMITS.maxHeadcount) {
       errors.push(err('headcount', `কতজন আসবে: ${LIMITS.minHeadcount} থেকে ${LIMITS.maxHeadcount}-এর মধ্যে একটি পূর্ণ সংখ্যা দাও।`,
         `Guests must be a whole number from ${LIMITS.minHeadcount} to ${LIMITS.maxHeadcount}.`));
     }
 
-    const budget = Number(body.budget);
+    const budget = toWholeNumber(body.budget);
     if (!Number.isInteger(budget) || budget < LIMITS.minBudget || budget > LIMITS.maxBudget) {
       errors.push(err('budget', `বাজেট ${LIMITS.minBudget} থেকে ${LIMITS.maxBudget} টাকার মধ্যে একটি পূর্ণ সংখ্যা হতে হবে।`,
         `Budget must be a whole number of rupees from ${LIMITS.minBudget} to ${LIMITS.maxBudget}.`));
@@ -297,7 +309,7 @@
 
     if (change && change.type === 'delay') {
       const known = TEMPLATES[input.eventType].some((t) => t.id === change.taskId);
-      const days = Number(change.days);
+      const days = toWholeNumber(change.days);
       if (!known || !Number.isInteger(days) || days < 1 || days > LIMITS.maxDelayDays) {
         return { ok: false, errors: [err('delay', `দেরির দিন ১ থেকে ${LIMITS.maxDelayDays}-এর মধ্যে হতে হবে।`, `Delay must be between 1 and ${LIMITS.maxDelayDays} days.`)] };
       }
@@ -365,17 +377,22 @@
 
   // ------------------------------------------------------------------ exports
   const CRLF = '\r\n';
-  const icsEscape = (text) => String(text).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+    const icsEscape = (text) => String(text).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
   const icsDate = (iso) => iso.replace(/-/g, '');
+
+  /** UTF-8 size of one character, worked out from its code point (no temporary byte array per character). */
+  const utf8Size = (char) => {
+    const code = char.codePointAt(0);
+    return code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  };
 
   /** RFC 5545 line folding: at most 75 octets per line, never splitting a UTF-8 character. */
   function foldLine(line) {
-    const encoder = new TextEncoder();
     const parts = [];
     let current = '';
     let size = 0;
     for (const char of line) {
-      const bytes = encoder.encode(char).length;
+      const bytes = utf8Size(char);
       const limit = parts.length === 0 ? 75 : 74; // continuation lines start with one space
       if (size + bytes > limit) {
         parts.push(current);
@@ -446,7 +463,7 @@
     const topic = (TOPICS.find(([, words]) => words.some((w) => q.includes(w))) || [])[0] || 'default';
     const bn = lang === 'bn';
     const preset = PRESETS[plan.input.eventType];
-    const names = (ids) => ids.map((id) => pick(CATEGORIES[id], lang)).join(bn ? ', ' : ', ');
+    const names = (ids) => ids.map((id) => pick(CATEGORIES[id], lang)).join(', ');
     const firstThree = plan.tasks.slice(0, 3).map((t) => `${pick(t.title, lang)} (${formatDate(t.due, lang)})`).join('; ');
 
     if (topic === 'rain') {
@@ -491,7 +508,7 @@
   return {
     LIMITS, EVENT_TYPES, CATEGORIES, PRESETS, TEMPLATES, MIN_TOTAL_PER_HEAD,
     parseISODate, toISODate, addDays, daysBetween,
-    pick, localizeDigits, formatRupee, formatDate,
+    pick, localizeDigits, toWholeNumber, formatRupee, formatDate,
     validateInput, allocateBudget, buildPlan, applyChange, comparePlans,
     summaryLine, fallbackAssist, seasonContext, toICS, toText, foldLine, answerFallback,
   };
