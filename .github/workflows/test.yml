@@ -4,23 +4,37 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# A newer push to the same branch or PR replaces a run that is still going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     name: Node.js ${{ matrix.node-version }} tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - run: npm test
-      - if: matrix.node-version == 22
+      - name: Syntax check
+        run: npm run check
+      - name: Tests
+        run: npm test
+      # Coverage thresholds are enforced on one version; they fail the build if coverage drops.
+      - name: Coverage (with minimum thresholds)
+        if: matrix.node-version == 24
         run: npm run coverage
