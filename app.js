@@ -23,6 +23,13 @@
   let assistToken = 0; // lets a newer AI request replace an older one
   let askToken = 0; // same, for questions
 
+  /** Ignore responses created for an older plan or language. */
+  function invalidatePendingRequests() {
+    assistToken += 1;
+    askToken += 1;
+    $('aiSection').setAttribute('aria-busy', 'false');
+  }
+
   const t = (key, ...args) => {
     const value = TEXT[lang][key];
     return typeof value === 'function' ? value(...args) : value;
@@ -281,6 +288,7 @@
       showErrors(checked.errors);
       return;
     }
+    invalidatePendingRequests();
     state = { input: checked.value, delays: {} };
     plan = Core.buildPlan(state.input, today, state.delays);
     renderPlan();
@@ -317,6 +325,7 @@
       box.focus();
       return;
     }
+    invalidatePendingRequests();
     state = result.state;
     plan = result.plan;
     renderPlan();
@@ -375,6 +384,7 @@
   }
 
   function setLanguage(next) {
+    invalidatePendingRequests();
     lang = next;
     if (state) state.input = { ...state.input, lang };
     applyStrings();
