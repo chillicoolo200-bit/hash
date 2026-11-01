@@ -48,24 +48,26 @@ Browser (index.html, app.js, strings.js, core.js, data.js)
 ## Run and test
 
 ```bash
-npm test            # 79 tests, Node 20+, no dependencies, no network, no API key needed
+npm test            # 82 tests, Node 20+ runtime syntax, no dependencies, no network, no API key needed
 npm run coverage    # same, with Node's built-in coverage report
 ```
 
-GitHub Actions runs the tests on every push (`.github/workflows/test.yml`).
-Deploy on Vercel: import this repository, add the environment variable `GEMINI_API_KEY`
-(a free key from Google AI Studio), deploy. There is no build step.
+GitHub Actions runs tests on Node.js 22 and 24 for every push and pull request. The Node 24 coverage job currently reports 99.47% line, 93.58% branch and 95.95% function coverage. CodeQL static analysis runs separately on pushes, pull requests and a weekly schedule.
+
+Deploy on a compatible Node.js serverless host: add the environment variable `GEMINI_API_KEY` (a key from Google AI Studio), then deploy. There is no build step. `vercel.json` contains Vercel-specific response headers; other hosts must be configured with equivalent headers separately.
 
 ## Quality notes (mapped to the evaluation areas)
 
-| Area | What was done |
+| Area | What is implemented and what remains |
 |---|---|
-| Code quality | Content (`data.js`), logic (`core.js`), interface text (`strings.js`), UI wiring (`app.js`) and server (`api/assist.js`) are separate, each small and documented; pure functions; no dependencies. |
-| Security | API key only in an environment variable, never returned or logged; only JSON bodies up to 8 KB; every input validated and length-limited; free text (notes, questions) is sent to the model as quoted data with an instruction not to follow it; AI output is sanitised and rendered with `textContent` (never `innerHTML`); strict Content-Security-Policy, HSTS and other headers in `vercel.json`; per-IP rate limit; a test scans the repository for key-shaped strings. |
-| Efficiency | One AI call per plan or question, 8.5 s deadline, plan computed in the browser, no build step, no runtime dependencies. |
-| Testing | 79 tests: planning logic (budget always adds up, dependency order, compression, re-planning, context rules, calendar file validity), the API with a fake Gemini (success, model fallback, 403/429, timeout, malformed output, prompt-injection text, size and content-type limits, rate limit, key never leaks), and static checks of the interface (labels, ids, heading order, CSP-safe markup, translation completeness, colour contrast). |
-| Accessibility | Semantic landmarks and headings, labelled fields, error summary whose items focus the field, `aria-describedby`, live regions for status, focus moved to results and answers, keyboard-visible focus ring, 44px touch targets, text (not colour) for status, `lang` switches with the language, WCAG AA colour contrast (tested), forced-colors and high-contrast support, reduced motion, `noscript` message, print stylesheet. |
-| Problem alignment | A dynamic assistant that asks occasion, budget and headcount, turns a vague goal into an ordered task list, decides from context (season, crowd, diet, time left), and re-plans when a booking is delayed. |
+| Code quality | Content (`data.js`), logic (`core.js`), interface text (`strings.js`), UI wiring (`app.js`) and server (`api/assist.js`) are separated; planning functions are deterministic; no runtime dependencies. |
+| Security | API key is read from the server environment and is never returned; JSON body size and fields are validated; AI output is schema-checked and rendered with `textContent`; same-origin browser requests are checked when an Origin header is present; IP rate limiting avoids trusting caller-supplied `X-Forwarded-For`; CSP and other headers are defined for Vercel. The in-memory limiter is best-effort per warm instance, not a distributed abuse-control system. |
+| Efficiency | Planning runs locally without network access; AI output is capped at 1,200 tokens; requests have a deadline and a deterministic fallback; no runtime dependencies or build step. |
+| Testing | 82 automated tests cover planning rules, API validation/fallback/security, translations, markup, contrast and security-sensitive rendering. CI tests Node.js 22 and 24; Node 24 reports 99.47% line, 93.58% branch and 95.95% function coverage. Coverage is not proof of correctness. |
+| Accessibility | Semantic landmarks/headings, labelled fields, error summary and field descriptions, live announcements, visible keyboard focus, reduced-motion and forced-colors CSS, 44px touch-target rules and automated WCAG AA colour-contrast checks are present. Automated static checks do not replace manual keyboard, screen-reader, zoom/reflow and real-device testing; those remain release checks. |
+| Problem alignment | The core flow gathers event type, date, guest count, budget and dietary needs; creates a budget and dependency-aware timeline; responds to seasonal and scheduling context; and recalculates when dates, costs, attendance or task timing change. |
+
+
 
 ## Assumptions
 
