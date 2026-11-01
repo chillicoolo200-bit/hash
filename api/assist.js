@@ -239,7 +239,9 @@ function createHandler(deps) {
       }
     }
     if (!body || typeof body !== 'object' || Array.isArray(body)) return send(400, { error: 'bad_json' });
-    if (JSON.stringify(body).length > MAX_BODY_BYTES) return send(413, { error: 'body_too_large' });
+    // Measure UTF-8 bytes, not JavaScript characters: Bengali and other multibyte text
+    // can otherwise pass the 8 KB limit while occupying several times that many bytes.
+    if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_BODY_BYTES) return send(413, { error: 'body_too_large' });
 
     // "today" comes from the browser (the organiser's own calendar day) but only if it is plausible.
     const serverToday = Core.toISODate(now());

@@ -221,6 +221,9 @@ test('rejects bodies that are not JSON (415) or too large (413)', async () => {
   assert.equal(hugeHeader.statusCode, 413);
   const hugeBody = await request(handler, { body: { ...GOOD_BODY, filler: 'x'.repeat(MAX_BODY_BYTES) }, ip: '3.3.3.4' });
   assert.equal(hugeBody.statusCode, 413);
+  // A multibyte Bengali payload can be under 8 KB in JS characters but exceed 8 KB on the wire.
+  const multibyteBody = await request(handler, { body: { ...GOOD_BODY, filler: 'অ'.repeat(3000) }, ip: '3.3.3.5' });
+  assert.equal(multibyteBody.statusCode, 413);
   assert.equal(calls.length, 0);
 });
 
