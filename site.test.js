@@ -8,6 +8,9 @@ const path = require('node:path');
 
 const read = (file) => fs.readFileSync(path.join(__dirname, file), 'utf8');
 const html = read('index.html');
+const notFound = read('404.html');
+const favicon = read('favicon.svg');
+const vercel = JSON.parse(read('vercel.json'));
 const css = read('style.css');
 const appJs = read('app.js');
 const { TEXT, REASONS } = require('./strings.js');
@@ -20,6 +23,17 @@ test('the page declares its language, has one h1 and a viewport that allows zoom
   assert.equal((html.match(/<h1[\s>]/g) || []).length, 1);
   const viewport = html.match(/<meta name="viewport" content="([^"]+)"/)[1];
   assert.doesNotMatch(viewport, /user-scalable\s*=\s*no|maximum-scale/);
+});
+
+test('favicon, real 404 page and cross-origin security headers are present', () => {
+  assert.match(html, /rel="icon" href="\\/favicon\\.svg"/);
+  assert.match(favicon, /<svg[\\s>]/);
+  assert.match(notFound, /404/);
+  assert.match(notFound, /href="\\/"/);
+  assert.doesNotMatch(notFound, /\\sstyle="/);
+  const headers = vercel.headers.flatMap((rule) => rule.headers || []);
+  assert.ok(headers.some((h) => h.key === 'Cross-Origin-Embedder-Policy' && h.value === 'require-corp'));
+  assert.ok(headers.some((h) => h.key === 'Cross-Origin-Resource-Policy' && h.value === 'same-origin'));
 });
 
 test('ids are unique and every reference points at an existing id', () => {
