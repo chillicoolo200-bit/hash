@@ -1,99 +1,90 @@
-# CelebrAI — AI Event Planner
+# অনুষ্ঠান বন্ধু (Anushthan Bondhu)
 
-**Live app:** https://celebrai-ai-event.hatchable.site  
-**Repository:** https://github.com/chillicoolo200-bit/hash
+A GenAI-assisted event planner for **neighbourhood pujas, college fests, birthdays and family functions** in
+West Bengal. Built for PromptWars Virtual, Challenge 5 (*Celebration & Event Planner*). Works in Bengali and English
+and is designed for a phone screen.
 
-## Solution vertical and persona
+**Chosen vertical / persona:** a volunteer organiser of a para puja or college fest: small budget, short time,
+many people to coordinate. Birthdays and family events (weddings, annaprashan) use the same engine.
 
-**Proposed vertical:** Event planning / personal productivity assistant. CelebrAI serves as a practical co-planner for a person organizing a birthday, wedding, community gathering, or other celebration in India. It helps users turn their event context, guest count, budget, location, date, and preferences into an actionable starter plan.
+## What it does
 
-**Important submission note:** The challenge portal's complete list of allowed verticals could not be independently verified from the public page. Before submitting, confirm that event planning is an allowed vertical for the selected challenge. If the challenge requires a different persona/problem statement, adapt the app and this README to that exact statement.
-
-## Problem and approach
-
-Planning an event requires coordinating a budget, tasks, timing, inclusion needs, and practical risks. CelebrAI combines a context-aware plan generator with a second-pass quality review.
-
-1. Collect event type, optional event name/date/location, guest count, budget in INR, and preferences.
-2. Validate numeric inputs and bound free-text lengths on the server.
-3. Ask the configured AI provider to return structured JSON containing budget categories, checklist items, timeline milestones, personalized ideas, and practical tips.
-4. Validate the response shape and normalize budget allocations so the plan does not exceed the stated budget.
-5. Run a separate review endpoint that performs deterministic budget, schedule, inclusion, and risk checks, then asks the AI provider to synthesize the findings into prioritized actions.
-6. If plan generation is unavailable, return a clearly labeled starter template rather than pretending it is a personalized AI result.
+1. **Asks a few practical questions:** event type, date, number of guests, total budget, vegetarian-only, free-text notes.
+2. **Splits the budget** by category (always adds up to the exact total, with a 10% contingency fund) and warns when the
+   budget per guest or food per guest looks too low, naming what to trim first.
+3. **Builds a timeline backwards from the event date**, with dependencies ("no permission, no sound booking") and
+   "ask the vendor these questions before you book" checklists.
+4. **Decides from context:** rainy months add a rain-cover warning; in busy booking months vendor tasks are tagged
+   "book early"; crowd events get a volunteer estimate (one per 25 guests, at least 4); vegetarian-only adds a kitchen
+   question to every food task; a tight schedule is compressed and flagged.
+5. **Re-plans when something changes:** a task is late, the date moves, the budget or guest count changes. It shows exactly
+   which tasks moved, which budget lines changed and which new warnings appear. Small delays are absorbed by slack.
+6. **Uses Gemini for the creative part:** a "do this first" step, 5 personalised ideas, 3 ways to spend less, and a
+   ready-to-send WhatsApp message (contribution request for a puja, sponsorship request for a fest, invitation otherwise).
+7. **Answers questions about the plan** ("What should I book first?", "What if it rains?"). Gemini answers from the real plan;
+   if it cannot, fixed rules answer from the same plan data.
+8. **Takes the plan with you:** download the timeline as a calendar file (.ics, one all-day event per task with a reminder),
+   copy it as text for a WhatsApp group, or print/save as PDF.
 
 ## How it works
 
-### Frontend
-- `public/index.html` — accessible page structure and event input form.
-- `public/app.js` — form state, API calls, plan rendering, navigation, checklist progress, and local draft persistence.
-- `public/style.css`, `public/extra.css` — responsive visual styling.
+```
+Browser (index.html, app.js, strings.js, core.js, data.js)
+   |  plan = core.js: instant, offline, exact
+   |
+   +--POST /api/assist-->  api/assist.js  -> validate -> prompt -> Gemini -> parse -> clean
+                           (any failure: built-in templates / rules, with the reason shown)
+```
 
-### Backend
-- `api/plan.js` — validates event input, generates a plan, validates the returned structure, and caps budget allocations.
-- `api/review.js` — validates the supplied plan and event context, runs deterministic audits, and generates prioritized review feedback.
-- `hatchable.toml` — Hatchable AI runtime configuration.
+* **Code decides the numbers.** Money, dates, dependencies, context rules and re-planning are pure functions in `core.js`
+  (content in `data.js`). No network, no randomness, so they are exact and testable. The AI is never asked to do arithmetic.
+* **Gemini decides the words.** The server sends the real plan (budget lines, first tasks, warnings) as context and asks for
+  JSON only. Output is parsed, length-limited and stripped of angle brackets before it reaches the browser.
+* **Always an answer.** If the API key is missing, the quota is used up, the model is unavailable, the call is slow or the
+  answer is malformed, the app shows built-in templates or rule-based answers and says why on screen (for example "no API key set").
+* **Model names change**, so the handler tries `gemini-flash-latest`, then `gemini-3.5-flash-lite`, then `gemini-3.6-flash`.
+  Override with `GEMINI_MODEL` (comma-separated).
 
-### API contracts
-- `POST /api/plan`: accepts `event_type`, `guests`, `budget`, and optional event details.
-- `POST /api/review`: accepts `plan` and `event` objects.
+## Run and test
 
-## Logical decision-making and context
+```bash
+npm test            # 79 tests, Node 20+, no dependencies, no network, no API key needed
+npm run coverage    # same, with Node's built-in coverage report
+```
 
-- Event type influences the starter template and suggestions.
-- Guest count and budget determine the per-person budget context.
-- Location and user preferences are passed into the planning prompt.
-- The review logic checks overspending, remaining budget, duplicate categories, date format/past dates, dietary needs, accessibility, weather backup for outdoor events, supplier confirmation, contingency, and safety considerations for large gatherings.
-- The review's readiness score is an estimate, not a certification or guarantee.
+GitHub Actions runs the tests on every push (`.github/workflows/test.yml`).
+Deploy on Vercel: import this repository, add the environment variable `GEMINI_API_KEY`
+(a free key from Google AI Studio), deploy. There is no build step.
 
-## Assumptions and limitations
+## Quality notes (mapped to the evaluation areas)
 
-- Currency is INR and the initial target context is India.
-- Budget amounts and planning suggestions are estimates, not live quotes.
-- CelebrAI does not verify vendor identity, prices, availability, bookings, permits, or venue accessibility. Users must confirm these directly.
-- Date scheduling uses the supplied date; if no date is provided, the app offers relative planning milestones.
-- The deployed app may use Hatchable's managed Gemini provider. The exact model ID is not guaranteed unless a direct Gemini API key is configured and the provider response/logs are checked.
-- The deployed API is public and currently does not require app-user authentication. Do not submit sensitive personal information.
-- Draft and checklist persistence uses browser local storage on the current device.
+| Area | What was done |
+|---|---|
+| Code quality | Content (`data.js`), logic (`core.js`), interface text (`strings.js`), UI wiring (`app.js`) and server (`api/assist.js`) are separate, each small and documented; pure functions; no dependencies. |
+| Security | API key only in an environment variable, never returned or logged; only JSON bodies up to 8 KB; every input validated and length-limited; free text (notes, questions) is sent to the model as quoted data with an instruction not to follow it; AI output is sanitised and rendered with `textContent` (never `innerHTML`); strict Content-Security-Policy, HSTS and other headers in `vercel.json`; per-IP rate limit; a test scans the repository for key-shaped strings. |
+| Efficiency | One AI call per plan or question, 8.5 s deadline, plan computed in the browser, no build step, no runtime dependencies. |
+| Testing | 79 tests: planning logic (budget always adds up, dependency order, compression, re-planning, context rules, calendar file validity), the API with a fake Gemini (success, model fallback, 403/429, timeout, malformed output, prompt-injection text, size and content-type limits, rate limit, key never leaks), and static checks of the interface (labels, ids, heading order, CSP-safe markup, translation completeness, colour contrast). |
+| Accessibility | Semantic landmarks and headings, labelled fields, error summary whose items focus the field, `aria-describedby`, live regions for status, focus moved to results and answers, keyboard-visible focus ring, 44px touch targets, text (not colour) for status, `lang` switches with the language, WCAG AA colour contrast (tested), forced-colors and high-contrast support, reduced motion, `noscript` message, print stylesheet. |
+| Problem alignment | A dynamic assistant that asks occasion, budget and headcount, turns a vague goal into an ordered task list, decides from context (season, crowd, diet, time left), and re-plans when a booking is delayed. |
 
-## Security, accessibility, and maintainability
+## Assumptions
 
-- Server-side validation rejects out-of-range guest counts and budgets.
-- Free-text input lengths are bounded and angle brackets are removed before values are used in prompts.
-- User-provided content is treated as data rather than instructions in the planning/review prompts.
-- The frontend escapes AI-provided text before inserting it into HTML.
-- No API key should be committed to this repository. Configure secrets through the hosting platform's secure settings.
-- The UI uses semantic form controls and responsive CSS; accessibility should still be verified manually with keyboard-only navigation, visible focus, zoom, and a screen reader before final submission.
+* Budget shares per event type, minimum food per guest (₹20 to ₹80 depending on type), the ₹50 minimum total per guest, task
+  lead times, the volunteer ratio, rainy months (June to September) and busy booking months (puja: October, November, January,
+  February; family events: November to February) are rules of thumb for West Bengal, not official figures.
+  They are easy to change in `data.js` and at the top of `core.js`.
+* Permissions, loudspeaker rules and prices differ by place. The app only reminds the organiser to ask the local office or vendor.
+* Amounts are in Indian rupees; dates use the organiser's local calendar day.
+* No user data is stored. Requests are processed and discarded.
+* The rate limiter is in memory, so on serverless hosting it is best-effort per warm instance.
 
-## Testing performed
+## Files
 
-The following live endpoint smoke tests passed during project verification:
-- `POST /api/plan` with valid event input: HTTP 200.
-- `POST /api/plan` with an invalid guest count: HTTP 400.
-- `POST /api/review` with valid event/plan input: HTTP 200.
-- `POST /api/review` with invalid guest count: HTTP 400.
-- Hatchable dry-run deploy validation: no errors or warnings.
+`index.html`, `style.css`, `app.js`, `strings.js` (interface) · `data.js`, `core.js` (content and planning logic) ·
+`api/assist.js` (server) · `core.test.js`, `assist.test.js`, `site.test.js` (tests) · `DESIGN.md` (design notes) ·
+`vercel.json` (security headers) · `.github/workflows/test.yml` (CI).
 
-These are smoke tests, not a complete automated test suite. Browser-based end-to-end, accessibility, and cross-device tests remain to be completed.
+## How AI was used
 
-## Run / deploy
-
-This source targets Hatchable's file-based runtime and SDK; it is not a standalone Node/npm app.
-
-1. Import or copy these files into a Hatchable project.
-2. Configure the AI provider/key through secure project settings; never commit a real key.
-3. Run the platform dry-run validator.
-4. Deploy, then test both endpoints with valid and invalid inputs.
-5. Test the full browser flow: enter event details → generate plan → review plan → tick checklist items → reload and verify saved draft behavior.
-
-## Demo video
-
-A public/unlisted demo video has not yet been uploaded from this repository. Before submission, record the live app showing event input, generated plan, budget/checklist/timeline, and plan review. Publish the video as Public or Unlisted if accepted by the portal, and add the link here.
-
-## Challenge submission checklist
-
-- [ ] Confirm the exact allowed challenge vertical/persona in the authenticated portal.
-- [ ] Confirm the challenge deadline and all required form fields.
-- [ ] Keep the repository public and on one branch only.
-- [ ] Verify the full Git repository/ZIP is below 10 MB.
-- [ ] Add the final demo-video URL.
-- [ ] Run the browser and accessibility checks.
-- [ ] Submit only after reviewing the final repository and links; the portal states that only three attempts are allowed.
+The application calls the **Gemini API** at run time for ideas, tips, the message draft and answers to questions. The code,
+tests and this documentation were drafted with **Claude** by prompting and then run and reviewed.

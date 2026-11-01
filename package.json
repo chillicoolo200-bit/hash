@@ -1,0 +1,14 @@
+{
+  "name": "anushthan-bondhu",
+  "version": "1.0.0",
+  "description": "GenAI event planner for pujas, college fests, birthdays and family events (PromptWars Virtual, Challenge 5).",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "coverage": "node --test --experimental-test-coverage"
+  }
+}

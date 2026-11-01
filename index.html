@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>অনুষ্ঠান বন্ধু | Event planner for pujas, fests and parties</title>
+  <meta name="description" content="Budget, timeline, vendor questions and ideas for a neighbourhood puja, college fest, birthday or family event. Bengali and English.">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#1b2a6b">
+  <link rel="stylesheet" href="style.css">
+  <script src="data.js" defer></script>
+  <script src="core.js" defer></script>
+  <script src="strings.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <noscript>
+    <p class="noscript">এই পেজ চালাতে JavaScript চালু থাকতে হবে। This page needs JavaScript to be turned on.</p>
+  </noscript>
+  <a class="skip" href="#main" data-i18n="skip">মূল অংশে যাও</a>
+
+  <header class="masthead">
+    <div class="alpona" aria-hidden="true"></div>
+    <div class="masthead__row">
+      <div>
+        <h1 data-i18n="title">অনুষ্ঠান বন্ধু</h1>
+        <p class="tagline" data-i18n="tagline">পাড়ার পুজো, কলেজ ফেস্ট বা ঘরোয়া অনুষ্ঠান: বাজেট, কাজের তারিখ আর আইডিয়া এক জায়গায়।</p>
+      </div>
+      <button type="button" id="langToggle" class="btn btn--ghost" lang="en" aria-label="Switch to English">English</button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <section class="panel" aria-labelledby="formTitle">
+      <h2 id="formTitle" data-i18n="formTitle">অনুষ্ঠানের তথ্য দাও</h2>
+      <div id="formErrors" class="errors" role="alert" tabindex="-1" hidden></div>
+      <p class="hint" data-i18n="requiredNote">সব ঘর পূরণ করতে হবে, শুধু "আর কিছু বলার আছে?" ঐচ্ছিক।</p>
+
+      <form id="planForm" novalidate>
+        <div class="field">
+          <label for="eventType" data-i18n="eventType">কীসের অনুষ্ঠান?</label>
+          <select id="eventType" name="eventType" required></select>
+        </div>
+
+        <div class="field">
+          <label for="eventDate" data-i18n="eventDate">অনুষ্ঠানের তারিখ</label>
+          <input type="date" id="eventDate" name="eventDate" required>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="headcount" data-i18n="headcount">কতজন আসবে?</label>
+            <input type="number" id="headcount" name="headcount" inputmode="numeric" min="5" max="5000" step="1" required>
+          </div>
+          <div class="field">
+            <label for="budget" data-i18n="budget">মোট বাজেট (টাকা)</label>
+            <input type="number" id="budget" name="budget" inputmode="numeric" min="2000" max="10000000" step="1" required>
+          </div>
+        </div>
+
+        <fieldset class="field choice">
+          <legend data-i18n="diet">খাবার</legend>
+          <label class="choice__item"><input type="radio" name="diet" value="any" checked> <span data-i18n="dietAny">সবরকম</span></label>
+          <label class="choice__item"><input type="radio" name="diet" value="veg"> <span data-i18n="dietVeg">শুধু নিরামিষ</span></label>
+        </fieldset>
+
+        <div class="field">
+          <label for="notes" data-i18n="notes">আর কিছু বলার আছে? (ঐচ্ছিক)</label>
+          <textarea id="notes" name="notes" rows="3" maxlength="300" aria-describedby="notesHint"></textarea>
+          <p id="notesHint" class="hint" data-i18n="notesHint">যেমন: বৃষ্টির ভয়, জায়গা ছোট, নতুন কমিটি। সর্বোচ্চ ৩০০ অক্ষর।</p>
+        </div>
+
+        <button type="submit" id="submitBtn" class="btn btn--primary" data-i18n="submit">প্ল্যান বানাও</button>
+      </form>
+    </section>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <div id="results" hidden>
+      <section class="panel" aria-labelledby="planTitle" id="planSection">
+        <h2 id="planTitle" tabindex="-1" data-i18n="planTitle">তোমার প্ল্যান</h2>
+        <p id="summaryText" class="lead"></p>
+        <p id="volunteersInfo" class="hint" hidden></p>
+        <ul id="warnings" class="warnings" role="list"></ul>
+        <div class="actions">
+          <button type="button" id="icsBtn" class="btn btn--ghost" data-i18n="exportIcs">ক্যালেন্ডারে নাও (.ics)</button>
+          <button type="button" id="textBtn" class="btn btn--ghost" data-i18n="exportText">প্ল্যান টেক্সট কপি করো</button>
+          <button type="button" id="printBtn" class="btn btn--ghost" data-i18n="print">প্রিন্ট বা PDF করো</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="budgetTitle">
+        <h2 id="budgetTitle" data-i18n="budgetTitle">বাজেট কোথায় কত</h2>
+        <div class="table-wrap">
+          <table class="budget">
+            <caption class="sr-only" data-i18n="budgetCaption">বিভাগ অনুযায়ী বাজেট ভাগ</caption>
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="colCategory">বিভাগ</th>
+                <th scope="col" data-i18n="colShare">ভাগ</th>
+                <th scope="col" class="num" data-i18n="colAmount">টাকা</th>
+              </tr>
+            </thead>
+            <tbody id="budgetBody"></tbody>
+            <tfoot>
+              <tr>
+                <th scope="row" data-i18n="total">মোট</th>
+                <td></td>
+                <td class="num" id="budgetTotal"></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="timelineTitle">
+        <h2 id="timelineTitle" data-i18n="timelineTitle">কোন কাজ কবে নাগাদ শেষ</h2>
+        <p class="hint" data-i18n="timelineHint">তারিখগুলো অনুষ্ঠান থেকে উল্টো দিকে গুনে সাজানো। কোনো কাজ আগে না হলে পরেরটাও আটকে যায়।</p>
+        <ol id="timelineList" class="timeline" role="list"></ol>
+      </section>
+
+      <section class="panel" aria-labelledby="aiTitle" id="aiSection" aria-busy="false">
+        <h2 id="aiTitle" data-i18n="aiTitle">আইডিয়া ও পরামর্শ</h2>
+        <p id="aiBadge" class="badge"></p>
+        <div id="aiBody">
+          <h3 data-i18n="focusTitle">সবার আগে</h3>
+          <p id="aiFocus"></p>
+          <h3 data-i18n="ideasTitle">তোমার অনুষ্ঠানের জন্য আইডিয়া</h3>
+          <ul id="ideasList" class="plain-list"></ul>
+          <h3 data-i18n="tipsTitle">খরচ কমানোর উপায়</h3>
+          <ul id="tipsList" class="plain-list"></ul>
+          <h3 data-i18n="messageTitle">WhatsApp-এ পাঠানোর বার্তা</h3>
+          <label for="messageBox" class="sr-only" data-i18n="messageLabel">বার্তার খসড়া</label>
+          <textarea id="messageBox" rows="6" readonly></textarea>
+          <div class="actions">
+            <button type="button" id="copyBtn" class="btn btn--ghost" data-i18n="copy">কপি করো</button>
+            <a id="waLink" class="btn btn--ghost" href="https://wa.me/" target="_blank" rel="noopener noreferrer" data-i18n="whatsapp">WhatsApp-এ খোলো</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="qaTitle">
+        <h2 id="qaTitle" data-i18n="qaTitle">প্ল্যানারকে জিজ্ঞেস করো</h2>
+        <p class="hint" data-i18n="qaLead">প্ল্যান নিয়ে যেকোনো প্রশ্ন করো। উত্তর দেবে AI, না পারলে প্ল্যানের তথ্য থেকে নিয়ম মেনে আমি।</p>
+        <ul class="chips" role="list">
+          <li><button type="button" class="chip" data-question="qaQ1" data-i18n="qaQ1">আগে কোনটা বুক করব?</button></li>
+          <li><button type="button" class="chip" data-question="qaQ2" data-i18n="qaQ2">বাজেট কম পড়লে কী ছাঁটব?</button></li>
+          <li><button type="button" class="chip" data-question="qaQ3" data-i18n="qaQ3">বৃষ্টি হলে কী করব?</button></li>
+        </ul>
+        <form id="qaForm" novalidate>
+          <div class="field">
+            <label for="qaInput" data-i18n="qaLabel">তোমার প্রশ্ন</label>
+            <input type="text" id="qaInput" maxlength="200" autocomplete="off" aria-describedby="qaHint">
+            <p id="qaHint" class="hint" data-i18n="qaHint">সর্বোচ্চ ২০০ অক্ষর।</p>
+          </div>
+          <button type="submit" class="btn btn--primary" data-i18n="qaSubmit">জিজ্ঞেস করো</button>
+        </form>
+        <div id="qaAnswer" class="answer" role="status" aria-live="polite" tabindex="-1" hidden>
+          <h3 data-i18n="qaAnswerTitle">উত্তর</h3>
+          <p id="qaAnswerText"></p>
+          <p id="qaBadge" class="badge"></p>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="replanTitle">
+        <h2 id="replanTitle" data-i18n="replanTitle">কিছু বদলেছে?</h2>
+        <p class="hint" data-i18n="replanLead">বদলটা বলো, কোন কাজ নড়ল আমি দেখিয়ে দেব।</p>
+        <form id="replanForm" novalidate>
+          <div class="field">
+            <label for="changeType" data-i18n="changeType">কী বদলেছে?</label>
+            <select id="changeType">
+              <option value="delay" data-i18n="changeDelay">একটা কাজ পিছিয়ে গেছে</option>
+              <option value="date" data-i18n="changeDate">অনুষ্ঠানের তারিখ বদলেছে</option>
+              <option value="budget" data-i18n="changeBudget">বাজেট বদলেছে</option>
+              <option value="headcount" data-i18n="changeHeadcount">অতিথির সংখ্যা বদলেছে</option>
+            </select>
+          </div>
+          <div class="field-row" data-change="delay">
+            <div class="field">
+              <label for="delayTask" data-i18n="delayTask">কোন কাজ?</label>
+              <select id="delayTask"></select>
+            </div>
+            <div class="field">
+              <label for="delayDays" data-i18n="delayDays">কত দিন পিছোল?</label>
+              <input type="number" id="delayDays" inputmode="numeric" min="1" max="60" step="1" value="5">
+            </div>
+          </div>
+          <div class="field" data-change="date" hidden>
+            <label for="newDate" data-i18n="newDate">নতুন তারিখ</label>
+            <input type="date" id="newDate">
+          </div>
+          <div class="field" data-change="budget" hidden>
+            <label for="newBudget" data-i18n="newBudget">নতুন বাজেট (টাকা)</label>
+            <input type="number" id="newBudget" inputmode="numeric" min="2000" max="10000000" step="1">
+          </div>
+          <div class="field" data-change="headcount" hidden>
+            <label for="newHeadcount" data-i18n="newHeadcount">নতুন অতিথির সংখ্যা</label>
+            <input type="number" id="newHeadcount" inputmode="numeric" min="5" max="5000" step="1">
+          </div>
+          <button type="submit" class="btn btn--primary" data-i18n="apply">প্ল্যান আপডেট করো</button>
+        </form>
+        <div id="diffBox" class="diff" role="status" aria-live="polite" tabindex="-1" hidden></div>
+        <button type="button" id="refreshAi" class="btn btn--ghost" data-i18n="refreshAi" hidden>নতুন তথ্যে AI-র পরামর্শ আবার নাও</button>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p data-i18n="footer">টাকা, তারিখ আর কাজের ক্রম হিসাব করে কোড, তাই সবসময় মেলে। AI দেয় আইডিয়া ও লেখা, ভুলও হতে পারে। অনুমতি, মাইকের নিয়ম আর দাম স্থানীয় অফিস ও বিক্রেতার কাছে যাচাই করে নিও।</p>
+  </footer>
+</body>
+</html>
