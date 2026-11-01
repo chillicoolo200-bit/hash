@@ -28,7 +28,7 @@ function fakeRes() {
 }
 function request(handler, { method = 'POST', body = GOOD_BODY, ip = '1.1.1.1', headers = {} } = {}) {
   const res = fakeRes();
-  const req = { method, body, headers: { 'x-forwarded-for': ip, 'content-type': 'application/json', ...headers }, socket: {} };
+  const req = { method, body, headers: { 'x-real-ip': ip, 'content-type': 'application/json', ...headers }, socket: { remoteAddress: ip } };
   return handler(req, res).then(() => res);
 }
 function makeHandler({ fetch, env = { GEMINI_API_KEY: KEY }, deadlineMs } = {}) {
@@ -295,4 +295,26 @@ test('the same module works as the Vercel default export', () => {
   const entry = require('./api/assist.js');
   assert.equal(typeof entry, 'function');
   assert.equal(entry.length, 2);
+});
+
+test('rate limiting ignores a caller-spoofed forwarded address and uses the platform client IP', async () => {
+  const { handler } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  for (let i = 0; i < RATE_LIMIT.max; i++) {
+    assert.equal((await request(handler, { ip: '9.9.9.9', headers: { 'x-forwarded-for': `1.2.3.${i}` } })).statusCode, 200);
+  }
+  assert.equal((await request(handler, { ip: '9.9.9.9', headers: { 'x-forwarded-for': '8.8.8.8' } })).statusCode, 429);
+});
+
+test('rejects cross-origin browser requests when an Origin header is present', async () => {
+  const { handler, calls } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  const res = await request(handler, { headers: { origin: 'https://attacker.example', host: 'app.example' } });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'origin_not_allowed');
+  assert.equal(calls.length, 0);
+});
+
+test('allows a same-origin HTTPS request', async () => {
+  const { handler } = makeHandler({ fetch: async () => geminiReply(GOOD_AI) });
+  const res = await request(handler, { headers: { origin: 'https://app.example', host: 'app.example' } });
+  assert.equal(res.statusCode, 200);
 });
