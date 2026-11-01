@@ -6,6 +6,13 @@
  * by core.js, so it works instantly and offline. Only the ideas and the WhatsApp message
  * come from the server (/api/assist -> Gemini). All text is written with textContent,
  * never innerHTML, so nothing typed by the user or returned by the AI can inject markup.
+ *
+ * Saving work (each point avoids a network call or wasted rendering):
+ *  - Real Gemini answers are remembered for the session, so switching language back, repeating a
+ *    question or refreshing with unchanged details costs nothing.
+ *  - If the server says there is no key, the key was refused or the free quota is used up, the page stops
+ *    calling it for a while and shows the built-in answer straight away.
+ *  - A request that has been replaced by a newer plan, language or question is cancelled, not just ignored.
  */
 (function () {
   const Core = window.AnushthanCore;
@@ -23,10 +30,18 @@
   let assistToken = 0; // lets a newer AI request replace an older one
   let askToken = 0; // same, for questions
 
-  /** Ignore responses created for an older plan or language. */
+  const CACHE_MAX = 12;
+  const aiCache = new Map(); // request key -> Gemini answer (never a built-in fallback, so a retry can still succeed)
+  const running = { assist: null, ask: null }; // the request currently in flight for each slot
+  // How long to stop calling the server after it reports a problem that will not fix itself quickly.
+  const BLOCK_MS = { no_api_key: Infinity, auth: Infinity, quota: 60000 };
+  let blocked = { until: 0, reason: '' };
+
+  /** Ignore responses created for an older plan or language, and cancel the requests that would produce them. */
   function invalidatePendingRequests() {
     assistToken += 1;
     askToken += 1;
+    for (const slot of Object.keys(running)) if (running[slot]) running[slot].abort();
     $('aiSection').setAttribute('aria-busy', 'false');
   }
 
@@ -202,10 +217,16 @@
       && strings(data.ideas) && strings(data.savingTips);
   };
 
-  /** POSTs to the server and returns the parsed answer. Throws an Error whose `reason` says why it failed. */
-  async function callServer(extra) {
+  /**
+   * POSTs to the server and returns the parsed answer. Throws an Error whose `reason` says why it failed.
+   * One request per slot ('assist' or 'ask') can run at a time: starting a new one cancels the old one.
+   */
+  async function callServer(extra, slot) {
+    if (running[slot]) running[slot].abort();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+    running[slot] = controller;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, AI_TIMEOUT_MS);
     try {
       const response = await fetch('/api/assist', {
         method: 'POST',
@@ -218,10 +239,37 @@
       return await response.json();
     } catch (error) {
       if (error && error.reason) throw error;
-      throw Object.assign(new Error('request failed'), { reason: error && error.name === 'AbortError' ? 'timeout' : 'offline' });
+      throw Object.assign(new Error('request failed'), { reason: timedOut ? 'timeout' : 'offline' });
     } finally {
       clearTimeout(timer);
+      if (running[slot] === controller) running[slot] = null;
     }
+  }
+
+  /**
+   * The answer for the current plan: from the session cache if possible, otherwise from the server.
+   * Throws (with a `reason`) when the answer must come from the built-in fallback instead.
+   */
+  async function getAnswer(slot, extra, isValid) {
+    const key = JSON.stringify([state.input, plan.today, extra.question || '']);
+    const hit = aiCache.get(key);
+    if (hit) {
+      aiCache.delete(key);
+      aiCache.set(key, hit); // most recently used goes last
+      return hit;
+    }
+    if (Date.now() < blocked.until) throw Object.assign(new Error('ai paused'), { reason: blocked.reason });
+
+    const data = await callServer(extra, slot);
+    if (!isValid(data)) throw Object.assign(new Error('unexpected answer'), { reason: 'offline' });
+    if (data.source === 'gemini') {
+      blocked = { until: 0, reason: '' };
+      aiCache.set(key, data);
+      while (aiCache.size > CACHE_MAX) aiCache.delete(aiCache.keys().next().value);
+    } else if (BLOCK_MS[data.reason]) {
+      blocked = { until: Date.now() + BLOCK_MS[data.reason], reason: data.reason };
+    }
+    return data;
   }
 
   async function loadAssist() {
@@ -232,9 +280,9 @@
 
     let data;
     try {
-      data = await callServer({});
-      if (!isUsable(data)) throw Object.assign(new Error('unexpected answer'), { reason: 'offline' });
+      data = await getAnswer('assist', {}, isUsable);
     } catch (error) {
+      if (token !== assistToken) return; // replaced meanwhile: skip the fallback work too
       // The plan never depends on the server: show built-in ideas instead.
       data = { ...Core.fallbackAssist(state.input, plan), source: 'fallback', reason: error.reason || 'offline' };
     }
@@ -256,9 +304,9 @@
     showAnswer(t('qaThinking'), '');
     let data;
     try {
-      data = await callServer({ action: 'ask', question });
-      if (typeof data.answer !== 'string' || !data.answer) throw Object.assign(new Error('unexpected answer'), { reason: 'offline' });
+      data = await getAnswer('ask', { action: 'ask', question }, (d) => Boolean(d) && typeof d.answer === 'string' && d.answer.length > 0);
     } catch (error) {
+      if (token !== askToken) return;
       data = { answer: Core.answerFallback(question, plan, lang), source: 'fallback', reason: error.reason || 'offline' };
     }
     if (token !== askToken) return;
