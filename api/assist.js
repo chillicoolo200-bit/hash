@@ -22,10 +22,10 @@ const Core = require('../core.js');
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/';
 // Model names change often, so they can be overridden with GEMINI_MODEL (comma separated).
 // The handler tries them in order and moves on if one is unavailable.
-const DEFAULT_MODELS = ['gemini-flash-latest', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'];
+const DEFAULT_MODELS = ['gemini-3.5-flash-lite'];
 const DEADLINE_MS = 8500; // stay under the 10 s limit of free serverless functions
-// 20 per minute per IP: generous because many phones share one IP behind a mobile carrier.
-const RATE_LIMIT = { windowMs: 60000, max: 20 };
+// User-requested cap: at most 14 requests per minute per client IP.
+const RATE_LIMIT = { windowMs: 60000, max: 14 };
 const MAX_BODY_BYTES = 8 * 1024;
 const QUESTION = { min: 3, max: 200 };
 const LANGUAGE_NAME = { bn: 'Bengali', en: 'English' };
@@ -285,7 +285,9 @@ function createHandler(deps) {
     const answer = (extra) => send(200, { ...task.fallback, ...extra });
 
     const env = getEnv();
-    const key = typeof env.GEMINI_API_KEY === 'string' ? env.GEMINI_API_KEY.trim() : '';
+    const key = typeof env.GOOGLE_API_KEY === 'string' && env.GOOGLE_API_KEY.trim()
+      ? env.GOOGLE_API_KEY.trim()
+      : (typeof env.GEMINI_API_KEY === 'string' ? env.GEMINI_API_KEY.trim() : '');
     if (!key) return answer({ source: 'fallback', reason: 'no_api_key' });
 
     const models = String(env.GEMINI_MODEL || '').split(',').map((m) => m.trim()).filter(Boolean);
