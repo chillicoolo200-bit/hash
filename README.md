@@ -48,11 +48,11 @@ Browser (index.html, app.js, strings.js, core.js, data.js)
 ## Run and test
 
 ```bash
-npm test            # 82 tests, Node 20+ runtime syntax, no dependencies, no network, no API key needed
+npm test            # 83 tests, Node 20+ runtime syntax, no dependencies, no network, no API key needed
 npm run coverage    # same, with Node's built-in coverage report
 ```
 
-GitHub Actions runs tests on Node.js 22 and 24 for every push and pull request. The Node 24 coverage job currently reports 99.47% line, 93.58% branch and 95.95% function coverage. CodeQL static analysis runs separately on pushes, pull requests and a weekly schedule.
+GitHub Actions runs tests on Node.js 22 and 24 for every push and pull request. The Node 24 coverage job currently reports 99.47% line, 93.59% branch and 95.96% function coverage. CodeQL static analysis runs separately on pushes, pull requests and a weekly schedule.
 
 Deploy on a compatible Node.js serverless host: add the environment variable `GEMINI_API_KEY` (a key from Google AI Studio), then deploy. There is no build step. `vercel.json` contains Vercel-specific response headers; other hosts must be configured with equivalent headers separately.
 
@@ -63,7 +63,7 @@ Deploy on a compatible Node.js serverless host: add the environment variable `GE
 | Code quality | Content (`data.js`), logic (`core.js`), interface text (`strings.js`), UI wiring (`app.js`) and server (`api/assist.js`) are separated; planning functions are deterministic; no runtime dependencies. |
 | Security | API key is read from the server environment and is never returned; JSON body size and fields are validated; AI output is schema-checked and rendered with `textContent`; same-origin browser requests are checked when an Origin header is present; IP rate limiting avoids trusting caller-supplied `X-Forwarded-For`; CSP and other headers are defined for Vercel. The in-memory limiter is best-effort per warm instance, not a distributed abuse-control system. |
 | Efficiency | Planning runs locally without network access; AI output is capped at 1,200 tokens; requests have a deadline and a deterministic fallback; no runtime dependencies or build step. |
-| Testing | 82 automated tests cover planning rules, API validation/fallback/security, translations, markup, contrast and security-sensitive rendering. CI tests Node.js 22 and 24; Node 24 reports 99.47% line, 93.58% branch and 95.95% function coverage. Coverage is not proof of correctness. |
+| Testing | 82 automated tests cover planning rules, API validation/fallback/security, translations, markup, contrast and security-sensitive rendering. CI tests Node.js 22 and 24; Node 24 reports 99.47% line, 93.59% branch and 95.96% function coverage. Coverage is not proof of correctness. |
 | Accessibility | Semantic landmarks/headings, labelled fields, error summary and field descriptions, live announcements, visible keyboard focus, reduced-motion and forced-colors CSS, 44px touch-target rules and automated WCAG AA colour-contrast checks are present. Automated static checks do not replace manual keyboard, screen-reader, zoom/reflow and real-device testing; those remain release checks. |
 | Problem alignment | The core flow gathers event type, date, guest count, budget and dietary needs; creates a budget and dependency-aware timeline; responds to seasonal and scheduling context; and recalculates when dates, costs, attendance or task timing change. |
 
