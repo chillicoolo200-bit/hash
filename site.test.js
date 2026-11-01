@@ -187,3 +187,10 @@ test('package.json has a test script and no runtime dependencies', () => {
   assert.equal(pkg.scripts.test, 'node --test');
   assert.equal(pkg.dependencies, undefined);
 });
+
+test('stale AI responses are invalidated when the plan or language changes', () => {
+  assert.match(appJs, /function invalidatePendingRequests\(\)[\s\S]*assistToken \+= 1;[\s\S]*askToken \+= 1;/);
+  assert.match(appJs, /function onSubmit\(event\)[\s\S]*invalidatePendingRequests\(\);[\s\S]*state = \{ input: checked\.value/);
+  assert.match(appJs, /function onReplan\(event\)[\s\S]*invalidatePendingRequests\(\);[\s\S]*state = result\.state/);
+  assert.match(appJs, /function setLanguage\(next\)[\s\S]*invalidatePendingRequests\(\);[\s\S]*lang = next/);
+});
