@@ -1,4 +1,6 @@
 'use strict';
+import Core from 'lib/core.js';
+import { ai, db } from 'hatchable';
 /**
  * api/assist.js - server side of "Anushthan Bondhu" (Vercel serverless function).
  *
@@ -18,13 +20,11 @@
  *  - A small per-IP rate limit protects the free quota (best effort on serverless).
  *  - Any unexpected error is caught and answered with a plain JSON 500; stack traces never reach the client.
  */
-const Core = require('../core.js');
+
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/';
 // Model names change often, so they can be overridden with GEMINI_MODEL (comma separated).
 // The handler tries them in order and moves on if one is unavailable.
-const DEFAULT_MODELS = ['gemini-3.5-flash-lite'];
-const DEADLINE_MS = 8500; // stay under the 10 s limit of free serverless functions
 // User-requested cap: at most 14 requests per minute per client IP.
 const RATE_LIMIT = { windowMs: 60000, max: 14 };
 const MAX_BODY_BYTES = 8 * 1024;
@@ -146,48 +146,52 @@ function extractText(data) {
 
 // --------------------------------------------------------------------- Gemini
 /** Tries each model in turn until one gives an answer that `accept` approves. Never throws. */
-async function askGemini({ key, models, prompt, accept, fetchImpl, deadlineMs, now }) {
-  const started = now();
-  let reason = 'model_unavailable';
-  for (const model of models) {
-    const remaining = deadlineMs - (now() - started);
-    if (remaining < 300) return { ok: false, reason: 'timeout' };
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), remaining);
-    try {
-      const response = await fetchImpl(`${ENDPOINT}${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: prompt.system }] },
-          contents: [{ role: 'user', parts: [{ text: prompt.user }] }],
-          // No temperature/topP/topK: Gemini 3.5+ deprecates them (ignored now, a 400 error in later generations);
-          // wording is steered by the system instruction instead. The output budget is bounded for latency and
-          // spend, but roomy enough for Bengali script, which uses many tokens per character.
-          generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS, responseMimeType: 'application/json' },
-        }),
-        signal: controller.signal,
-      });
-      if (response.status === 401 || response.status === 403) return { ok: false, reason: 'auth' };
-      if (!response.ok) {
-        reason = response.status === 429 ? 'quota' : 'model_unavailable';
-        continue;
-      }
-      const parsed = accept(extractText(await response.json()));
-      if (!parsed) {
-        reason = 'bad_response';
-        continue;
-      }
-      return { ok: true, model, parsed };
-    } catch (e) {
-      if (e && e.name === 'AbortError') return { ok: false, reason: 'timeout' };
-      // response.json() rejects with a SyntaxError when Gemini sends a body that is not JSON.
-      reason = e instanceof SyntaxError ? 'bad_response' : 'network';
-    } finally {
-      clearTimeout(timer);
+async function askGemini({ prompt, accept, responseSchema, maxOutputTokens }) {
+  try {
+    const response = await ai.fetch({
+      provider: 'google',
+      path: '/v1beta/models/gemini-3.5-flash-lite:generateContent',
+      body: {
+        systemInstruction: { parts: [{ text: prompt.system }] },
+        contents: [{ role: 'user', parts: [{ text: prompt.user }] }],
+        generationConfig: {
+          temperature: 0.4,
+          responseMimeType: 'application/json',
+          responseSchema,
+          maxOutputTokens
+        }
+      },
+      purpose: 'event-planning-assistance',
+      timeoutMs: 10000
+    });
+    if (!response.ok) {
+      const status = response.status;
+      const reason = status === 429 ? 'quota'
+        : status === 401 || status === 403 || status === 412 ? 'auth'
+        : status === 404 ? 'model_unavailable'
+        : 'model_unavailable';
+      return { ok: false, reason };
     }
+    const data = await response.json();
+    const parts = data && data.candidates && data.candidates[0] &&
+      data.candidates[0].content && data.candidates[0].content.parts;
+    const raw = Array.isArray(parts) ? parts.map((p) => p && typeof p.text === 'string' ? p.text : '').join('') : '';
+    const parsed = accept(raw);
+    if (!parsed) return { ok: false, reason: 'bad_response' };
+    return { ok: true, model: 'gemini-3.5-flash-lite', parsed };
+  } catch (error) {
+    const message = String(error && error.message || '').toLowerCase();
+    const code = String(error && error.code || '').toLowerCase();
+    const status = Number(error && (error.status || error.statusCode));
+    const reason = status === 429 || code.includes('quota') || message.includes('quota') || message.includes('rate limit')
+      ? 'quota'
+      : status === 401 || status === 403 || status === 412 || code.includes('setup_required')
+        ? 'auth'
+        : message.includes('timeout') || message.includes('abort') || code.includes('timeout')
+          ? 'timeout'
+          : 'model_unavailable';
+    return { ok: false, reason };
   }
-  return { ok: false, reason };
 }
 
 // ---------------------------------------------------------------------- cache
@@ -229,9 +233,7 @@ function clientIp(req) {
 
 /** Sends a JSON response. */
 function send(res, status, body) {
-  res.statusCode = status;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify(body));
+  return res.status(status).json(body);
 }
 
 /**
@@ -239,22 +241,34 @@ function send(res, status, body) {
  * { limited, retryAfterSec }. Memory is bounded: past `maxTracked` addresses it sheds stale
  * entries first and, if the table is still full, refuses new addresses.
  */
-function createRateLimiter({ windowMs, max, maxTracked, now }) {
-  const hits = new Map();
-  return {
-    hit(ip) {
-      const t = now();
-      const recent = (hits.get(ip) || []).filter((stamp) => t - stamp < windowMs);
-      recent.push(t);
-      hits.set(ip, recent);
-      if (hits.size > maxTracked) {
-        for (const [key, stamps] of hits) if (!stamps.length || t - stamps[stamps.length - 1] >= windowMs) hits.delete(key);
-      }
-      const limited = hits.size > maxTracked || recent.length > max;
-      const retryAfterSec = limited ? Math.max(1, Math.ceil((recent[0] + windowMs - t) / 1000)) : 0;
-      return { limited, retryAfterSec };
-    },
-  };
+/**
+ * Atomic fixed-window limiter shared by all serverless instances.
+ * IPs are stored only as SHA-256 digests; the database primary key serialises concurrent hits.
+ */
+async function enforceRateLimit(ip) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(ip || 'unknown')));
+  const ipHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  const result = await db.query(
+    "INSERT INTO api_rate_limits (route, ip_hash, window_start, hit_count) " +
+    "VALUES ($1, $2, to_timestamp(floor(extract(epoch from now()) / 60) * 60), 1) " +
+    "ON CONFLICT (route, ip_hash, window_start) DO UPDATE " +
+    "SET hit_count = api_rate_limits.hit_count + 1 " +
+    "RETURNING hit_count, window_start",
+    ['/api/assist', ipHash],
+  );
+  const row = result && result.rows && result.rows[0];
+  if (!row) throw new Error('rate_limit_storage_unavailable');
+  const windowStart = new Date(row.window_start).getTime();
+  const retryAfterSec = Math.max(1, Math.ceil((windowStart + RATE_LIMIT.windowMs - Date.now()) / 1000));
+  const hitCount = Number(row.hit_count);
+  if (hitCount === 1 && Math.floor(Date.now() / RATE_LIMIT.windowMs) % 60 === 0) {
+    try {
+      await db.query("DELETE FROM api_rate_limits WHERE window_start < now() - interval '2 hours'");
+    } catch (error) {
+      console.warn('rate_limit_cleanup_failed');
+    }
+  }
+  return { limited: hitCount > RATE_LIMIT.max, retryAfterSec };
 }
 
 /** Browsers send Origin on cross-site calls; when it is present it must be this site, over https (or localhost). */
@@ -268,12 +282,6 @@ function originAllowed(headers) {
   } catch (e) {
     return false;
   }
-}
-
-/** The Gemini key from the environment (GOOGLE_API_KEY preferred), or '' when none is set. */
-function readApiKey(env) {
-  const pick = (name) => (typeof env[name] === 'string' ? env[name].trim() : '');
-  return pick('GOOGLE_API_KEY') || pick('GEMINI_API_KEY');
 }
 
 /** Parses the body (already an object on Vercel, a string elsewhere). Returns a plain object or null. */
@@ -293,15 +301,11 @@ function readBody(raw) {
  * Builds the request handler. Dependencies can be replaced in tests:
  * { env, fetch, now, log, deadlineMs }.
  */
-function createHandler(deps) {
-  const d = deps || {};
-  const getEnv = d.env || (() => process.env);
-  const fetchImpl = d.fetch || ((...args) => fetch(...args));
-  const now = d.now || Date.now;
-  const log = d.log || ((...args) => console.warn(...args));
-  const deadlineMs = d.deadlineMs || DEADLINE_MS;
-  const limiter = createRateLimiter({ ...RATE_LIMIT, maxTracked: MAX_TRACKED_CLIENTS, now });
-  const cache = createAnswerCache({ ttlMs: d.cacheTtlMs === undefined ? CACHE.ttlMs : d.cacheTtlMs, max: d.cacheMax === undefined ? CACHE.max : d.cacheMax, now });
+function createHandler() {
+  const now = Date.now;
+  const log = (...args) => console.warn(...args);
+  // Request limits are enforced atomically in PostgreSQL by enforceRateLimit().
+  const cache = createAnswerCache({ ttlMs: CACHE.ttlMs, max: CACHE.max, now });
   const inflight = new Map(); // cache key -> the Gemini call already running for it
 
   async function handle(req, res) {
@@ -316,7 +320,14 @@ function createHandler(deps) {
 
     const headers = req.headers || {};
     if (!originAllowed(headers)) return send(res, 403, { error: 'origin_not_allowed' });
-    const rate = limiter.hit(clientIp(req));
+    let rate;
+    try {
+      rate = await enforceRateLimit(clientIp(req));
+    } catch (error) {
+      log('assist: rate limiter unavailable');
+      res.setHeader('Retry-After', '10');
+      return send(res, 503, { error: 'temporarily_unavailable' });
+    }
     if (rate.limited) {
       res.setHeader('Retry-After', String(rate.retryAfterSec));
       return send(res, 429, { error: 'too_many_requests' });
@@ -328,7 +339,7 @@ function createHandler(deps) {
     if (!body) return send(res, 400, { error: 'bad_json' });
     // Measure UTF-8 bytes, not JavaScript characters: Bengali and other multibyte text
     // can otherwise pass the 8 KB limit while occupying several times that many bytes.
-    if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_BODY_BYTES) return send(res, 413, { error: 'body_too_large' });
+    if (new TextEncoder().encode(JSON.stringify(body)).length > MAX_BODY_BYTES) return send(res, 413, { error: 'body_too_large' });
     if (body.action !== undefined && body.action !== 'ask') return send(res, 400, { error: 'invalid_action' });
 
     // "today" comes from the browser (the organiser's own calendar day) but only if it is plausible.
@@ -357,20 +368,43 @@ function createHandler(deps) {
 
     const plan = Core.buildPlan(input, today);
     const task = asking
-      ? { prompt: buildAskPrompt(input, plan, question), accept: parseAnswer, fallback: { answer: Core.answerFallback(question, plan, input.lang) } }
-      : { prompt: buildPrompt(input, plan), accept: parseAssist, fallback: Core.fallbackAssist(input, plan) };
+      ? {
+          prompt: buildAskPrompt(input, plan, question),
+          accept: parseAnswer,
+          responseSchema: {
+            type: 'OBJECT',
+            properties: { answer: { type: 'STRING' } },
+            required: ['answer'],
+          },
+          maxOutputTokens: 768,
+          fallback: { answer: Core.answerFallback(question, plan, input.lang) },
+        }
+      : {
+          prompt: buildPrompt(input, plan),
+          accept: parseAssist,
+          responseSchema: {
+            type: 'OBJECT',
+            properties: {
+              focus: { type: 'STRING' },
+              ideas: { type: 'ARRAY', items: { type: 'STRING' } },
+              savingTips: { type: 'ARRAY', items: { type: 'STRING' } },
+              messageDraft: { type: 'STRING' },
+            },
+            required: ['focus', 'ideas', 'savingTips', 'messageDraft'],
+          },
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          fallback: Core.fallbackAssist(input, plan),
+        };
     const answer = (extra) => send(res, 200, { ...task.fallback, ...extra });
 
-    const key = readApiKey(getEnv());
-    if (!key) return answer({ source: 'fallback', reason: 'no_api_key' });
-
-    const models = String(getEnv().GEMINI_MODEL || '').split(',').map((m) => m.trim()).filter(Boolean);
     // Identical requests that arrive while one is still running share that single Gemini call.
     let call = inflight.get(cacheKey);
     if (!call) {
       call = askGemini({
-        key, models: models.length ? models : DEFAULT_MODELS, prompt: task.prompt,
-        accept: task.accept, fetchImpl, deadlineMs, now,
+        prompt: task.prompt,
+        accept: task.accept,
+        responseSchema: task.responseSchema,
+        maxOutputTokens: task.maxOutputTokens,
       }).finally(() => inflight.delete(cacheKey));
       inflight.set(cacheKey, call);
     }
@@ -395,9 +429,9 @@ function createHandler(deps) {
   };
 }
 
-// Vercel runs the default export. The helpers are attached so tests can reach them.
-module.exports = createHandler();
-Object.assign(module.exports, {
-  createHandler, createRateLimiter, createAnswerCache, buildPrompt, buildAskPrompt, parseAssist, parseAnswer, askGemini, cleanQuestion,
-  DEFAULT_MODELS, RATE_LIMIT, CACHE, MAX_BODY_BYTES, MAX_TRACKED_CLIENTS, MAX_OUTPUT_TOKENS,
-});
+export const access = 'public';
+export const methods = ['POST'];
+const handler = createHandler();
+export default async function (req, res) {
+  return handler(req, res);
+}
