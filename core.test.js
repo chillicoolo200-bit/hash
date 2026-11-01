@@ -357,3 +357,40 @@ test('answerFallback uses real numbers from the plan', () => {
   assert.ok(Core.answerFallback('volunteers?', plan, 'en').includes('12'));
   assert.ok(Core.answerFallback('food', plan, 'en').includes('per guest'));
 });
+
+// ------------------------------------------------- strict numbers (round 2)
+test('toWholeNumber accepts plain digits (Bengali too) and rejects everything else', () => {
+  assert.equal(Core.toWholeNumber(150), 150);
+  assert.equal(Core.toWholeNumber('150'), 150);
+  assert.equal(Core.toWholeNumber(' 150 '), 150);
+  assert.equal(Core.toWholeNumber('১৫০'), 150);
+  assert.equal(Core.toWholeNumber('০৭'), 7);
+  for (const bad of ['0x64', '1e4', '+5', '-5', '5.0', '12.5', '', '   ', 'abc', '1,000', '1234567890', 12.5, NaN, Infinity,
+    null, undefined, true, [100], {}, () => 1]) {
+    assert.ok(Number.isNaN(Core.toWholeNumber(bad)), `should reject ${String(bad)}`);
+  }
+});
+
+test('validateInput does not let Number() quirks through', () => {
+  const base = { eventType: 'puja', eventDate: '2027-01-20', headcount: 100, budget: 50000 };
+  const fieldsFor = (patch) => Core.validateInput({ ...base, ...patch }, TODAY).errors.map((e) => e.field);
+  assert.deepEqual(fieldsFor({ headcount: '0x64' }), ['headcount']);
+  assert.deepEqual(fieldsFor({ budget: '1e5' }), ['budget']);
+  assert.deepEqual(fieldsFor({ headcount: [100] }), ['headcount']);
+  assert.deepEqual(fieldsFor({ budget: true }), ['budget']);
+  assert.deepEqual(fieldsFor({ headcount: '১০০', budget: '৫০০০০' }), []);
+});
+
+test('applyChange uses the same strict numbers for a delay', () => {
+  const state = { input: sample(), delays: {} };
+  const task = Core.TEMPLATES.puja[0].id;
+  assert.equal(Core.applyChange(state, { type: 'delay', taskId: task, days: '3' }, TODAY).ok, true);
+  assert.equal(Core.applyChange(state, { type: 'delay', taskId: task, days: '0x3' }, TODAY).ok, false);
+  assert.equal(Core.applyChange(state, { type: 'delay', taskId: task, days: '2.5' }, TODAY).ok, false);
+});
+
+test('the built-in answer for "what if a task is late" points to the re-plan form in both languages', () => {
+  const plan = Core.buildPlan(sample(), TODAY);
+  assert.match(Core.answerFallback('what if a vendor is late?', plan, 'en'), /Has something changed/);
+  assert.match(Core.answerFallback('দেরি হলে কী হবে', plan, 'bn'), /কিছু বদলেছে/);
+});
