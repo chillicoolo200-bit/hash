@@ -19,6 +19,14 @@ what breaks when something slips.
 | Server code only under `api/` | Not served as a static file; one function, one place to harden | Browser and server share `core.js`, which is public by design |
 | Content (`data.js`) and text (`strings.js`) apart from logic | Easier to review, translate and test | More files |
 | Rule-based answers beside the AI | Questions and ideas still work with no key or quota | Rules are simpler than a model |
+| Numbers parsed by `toWholeNumber`, not `Number()` | `Number()` accepts `0x64`, `1e4`, `[100]`; a form should only accept what a person would type (Bengali digits included) | A few unusual spellings are refused with a clear message |
+| One safety net around the whole API handler | A bug becomes a short JSON 500 and a log line, never a stack trace or a hung request | The client just shows the built-in answer |
+| No `temperature`/`topP`/`topK` in the Gemini request | Google deprecated them from Gemini 3.5 (ignored now, an error in later generations) | Wording variety comes from the prompt, not a dial |
+| Answer cache + shared in-flight call on the server | The same plan, language and question should cost one Gemini call, not several (language toggles, repeated chips, reloads, double taps) | Per warm instance only; an answer can be up to 10 minutes old |
+| Only Gemini answers are cached, never fallbacks | A fallback caused by an outage must not stick after the outage ends | A failing model is retried on every request |
+| Session cache and "pause when no key / quota" in the browser | Removes round trips whose result is already known; the built-in answer is identical to what the server would send | The page keeps showing the paused reason until reload (no key, refused) or one minute (quota) |
+| Superseded requests are aborted | A replaced request no longer holds a connection or triggers fallback work | The server may still finish the call it already started |
+| Rate limiter is its own small function | Testable with a fake clock, and it can send `Retry-After` | Still per warm instance |
 
 ## Data flow
 1. The browser validates the form with `core.validateInput` and builds the plan with `core.buildPlan`.
@@ -43,7 +51,11 @@ order, CSP-safe markup, translation completeness, colour contrast, no secrets). 
 phone widths with the production Content-Security-Policy turned on.
 
 ## Known limits
-* The rate limiter is per warm instance, not global.
+* The rate limiter is per warm instance, not global. Under a flood from more than 500 addresses at once it refuses new addresses rather than grow without bound.
+* Third-party GitHub Actions are pinned by version tag (`@v4`), not by commit hash; Dependabot proposes updates monthly.
+* The answer cache is per warm instance, like the rate limiter; it is a saving, not a guarantee. A cache hit still counts against the per-IP rate limit.
+* "Refresh AI advice" after a task delay returns the cached advice, because the server is not told about delays (it sees the same event details). Sending delays to the server would make the refresh meaningful; it is not done yet.
+* Static scripts are served with revalidation (ETag), not long-lived caching, because file names carry no content hash and the project has no build step; a long cache could mix versions of `core.js` and `app.js` after a deploy.
 * Budget presets and thresholds are heuristics.
 * Gemini output quality varies; the notes field is treated as untrusted but no model is injection-proof, which is why the
   output is sanitised and cannot execute anything.
