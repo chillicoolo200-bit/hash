@@ -34,7 +34,8 @@
   const aiCache = new Map(); // request key -> Gemini answer (never a built-in fallback, so a retry can still succeed)
   const running = { assist: null, ask: null }; // the request currently in flight for each slot
   // How long to stop calling the server after it reports a problem that will not fix itself quickly.
-  const BLOCK_MS = { no_api_key: Infinity, auth: Infinity, quota: 60000 };
+  // Retry transient key/gateway setup failures instead of disabling AI for the entire tab session.
+  const BLOCK_MS = { no_api_key: 60000, auth: Infinity, quota: 60000 };
   let blocked = { until: 0, reason: '' };
 
   /** Ignore responses created for an older plan or language, and cancel the requests that would produce them. */
