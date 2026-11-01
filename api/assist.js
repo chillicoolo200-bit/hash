@@ -155,7 +155,8 @@ async function askGemini({ key, models, prompt, accept, fetchImpl, deadlineMs, n
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: prompt.system }] },
           contents: [{ role: 'user', parts: [{ text: prompt.user }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 4096, responseMimeType: 'application/json' },
+          // The schema is short; a bounded output budget reduces latency and token spend.
+          generationConfig: { temperature: 0.7, maxOutputTokens: 1200, responseMimeType: 'application/json' },
         }),
         signal: controller.signal,
       });
@@ -182,8 +183,13 @@ async function askGemini({ key, models, prompt, accept, fetchImpl, deadlineMs, n
 
 // -------------------------------------------------------------------- handler
 function clientIp(req) {
-  const forwarded = String((req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim();
-  return forwarded || (req.socket && req.socket.remoteAddress) || 'unknown';
+  const headers = req.headers || {};
+  // Prefer the platform-provided single-client header. Do not trust the left-most
+  // x-forwarded-for value: a caller can prepend a spoofed address to that list.
+  const realIp = String(headers['x-real-ip'] || '').trim();
+  if (realIp && realIp.length <= 64 && /^[0-9a-fA-F:.]+$/.test(realIp)) return realIp;
+  const remote = String((req.socket && req.socket.remoteAddress) || '').trim();
+  return remote && remote.length <= 64 ? remote : 'unknown';
 }
 
 /**
@@ -205,8 +211,10 @@ function createHandler(deps) {
     recent.push(t);
     hits.set(ip, recent);
     if (hits.size > 500) {
-      for (const [k, v] of hits) if (t - v[v.length - 1] >= RATE_LIMIT.windowMs) hits.delete(k);
+      for (const [k, v] of hits) if (!v.length || t - v[v.length - 1] >= RATE_LIMIT.windowMs) hits.delete(k);
     }
+    // Bound memory even if a burst arrives from many distinct addresses.
+    if (hits.size > 500) return true;
     return recent.length > RATE_LIMIT.max;
   }
 
@@ -224,9 +232,22 @@ function createHandler(deps) {
       res.setHeader('Allow', 'POST');
       return send(405, { error: 'method_not_allowed' });
     }
-    if (tooMany(clientIp(req))) return send(429, { error: 'too_many_requests' });
 
     const headers = req.headers || {};
+    // Browsers may omit Origin for non-browser clients; when present, require same-origin.
+    if (headers.origin) {
+      try {
+        const origin = new URL(String(headers.origin));
+        const host = String(headers.host || '').toLowerCase();
+        const secure = origin.protocol === 'https:' || origin.hostname === 'localhost' || origin.hostname === '127.0.0.1';
+        if (!host || origin.host.toLowerCase() !== host || !secure) {
+          return send(403, { error: 'origin_not_allowed' });
+        }
+      } catch (e) {
+        return send(403, { error: 'origin_not_allowed' });
+      }
+    }
+    if (tooMany(clientIp(req))) return send(429, { error: 'too_many_requests' });
     if (!/^application\/json\b/i.test(String(headers['content-type'] || ''))) return send(415, { error: 'json_required' });
     if (Number(headers['content-length']) > MAX_BODY_BYTES) return send(413, { error: 'body_too_large' });
 
