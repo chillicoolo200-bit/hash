@@ -42,8 +42,9 @@ Browser (index.html, app.js, strings.js, core.js, data.js)
   JSON only. Output is parsed, length-limited and stripped of angle brackets before it reaches the browser.
 * **Always an answer.** If the API key is missing, the quota is used up, the model is unavailable, the call is slow or the
   answer is malformed, the app shows built-in templates or rule-based answers and says why on screen (for example "no API key set").
-* **Model names change**, so the handler tries `gemini-flash-latest`, then `gemini-3.5-flash-lite`, then `gemini-3.6-flash`.
-  Override with `GEMINI_MODEL` (comma-separated).
+* **Model:** the server uses the stable `gemini-3.5-flash-lite` model by default. Set `GEMINI_MODEL` only when deliberately testing another model.
+* **Secret:** set `GOOGLE_API_KEY` (preferred) or `GEMINI_API_KEY` in the server environment. The key is sent in the `x-goog-api-key` header, never in the URL or response.
+* **Abuse control:** the API allows at most 14 requests per minute per client IP in each warm serverless instance. Serverless in-memory limits are best-effort across multiple instances; provider-side quotas still apply.
 
 ## Run and test
 
@@ -54,7 +55,7 @@ npm run coverage    # same, with Node's built-in coverage report
 
 GitHub Actions runs tests on Node.js 22 and 24 for every push and pull request. The Node 24 coverage job currently reports 99.47% line, 93.59% branch and 95.96% function coverage. CodeQL static analysis runs separately on pushes, pull requests and a weekly schedule.
 
-Deploy on a compatible Node.js serverless host: add the environment variable `GEMINI_API_KEY` (a key from Google AI Studio), then deploy. There is no build step. `vercel.json` contains Vercel-specific response headers; other hosts must be configured with equivalent headers separately.
+Deploy on a compatible Node.js serverless host: add the environment variable `GEMINI_API_KEY` (a key from Google AI Studio), then deploy. There is no build step. `vercel.json` contains Vercel-specific response headers; other hosts must be configured with equivalent headers separately. `404.html` provides a custom not-found page and `favicon.svg` provides the app icon.
 
 ## Quality notes (mapped to the evaluation areas)
 
