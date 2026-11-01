@@ -4,11 +4,11 @@
   "description": "GenAI event planner for pujas, college fests, birthdays and family events (PromptWars Virtual, Challenge 5).",
   "private": true,
   "license": "MIT",
-  "engines": {
-    "node": ">=20"
-  },
+  "engines": { "node": ">=20" },
   "scripts": {
     "test": "node --test",
-    "coverage": "node --test --experimental-test-coverage"
+    "check": "node --check core.js && node --check data.js && node --check strings.js && node --check app.js && node --check api/assist.js",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-lines=97 --test-coverage-branches=90 --test-coverage-functions=92",
+    "verify": "npm run check && npm run coverage"
   }
 }
